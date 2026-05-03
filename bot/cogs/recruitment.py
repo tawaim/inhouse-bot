@@ -33,7 +33,7 @@ import discord
 import pytz
 from discord import app_commands
 from discord.ext import commands
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from bot.config import Config, ROLE_EMOJIS, ROLES
 from bot.db.models import GuildConfig, Match, MatchPerformance, Player, ProposalSet, Rating, Session as InhouseSession, Signup
@@ -362,18 +362,23 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
 # =============================================================================
 
 async def _refresh_public_counts(bot: discord.Client, session_id: int) -> None:
-    """Update the original public embed with current Playing/Not Playing/Commentator totals."""
+    """Update the original public embed with current Playing/Not Playing/Commentator
+    totals AND the list of users in each bucket."""
     async with get_session() as db:
         session = await db.get(InhouseSession, session_id)
         if session is None or session.recruit_msg_id is None:
             return
-        # Count by status in one query
-        stmt = (
-            select(Signup.status, func.count(Signup.discord_id))
+        signups = (await db.execute(
+            select(Signup)
             .where(Signup.session_id == session_id)
-            .group_by(Signup.status)
-        )
-        counts = dict((await db.execute(stmt)).all())
+            .order_by(Signup.signed_up_at.asc())
+        )).scalars().all()
+
+    # Bucket by status, in signup order
+    buckets: dict[str, list[int]] = {"playing": [], "not_playing": [], "commentator": []}
+    for s in signups:
+        if s.status in buckets:
+            buckets[s.status].append(s.discord_id)
 
     channel = bot.get_channel(session.recruit_channel_id)
     if channel is None:
@@ -383,22 +388,43 @@ async def _refresh_public_counts(bot: discord.Client, session_id: int) -> None:
     except (discord.NotFound, discord.Forbidden):
         return
 
-    # Rebuild the embed from scratch so we don't have to pluck-and-poke fields
     tz = pytz.timezone("America/New_York")
     signups_close = (
         pytz.UTC.localize(session.signups_close_at).astimezone(tz)
         if session.signups_close_at else None
     )
-    embed = _build_public_embed(session.game_date, signups_close, counts)
+    embed = _build_public_embed(session.game_date, signups_close, buckets)
     await msg.edit(embed=embed)
 
 
+def _format_user_list(user_ids: list[int], max_chars: int = 950) -> str:
+    """Format a list of discord IDs as @-mentions, one per line.
+    Discord embed field values cap at 1024 chars; we truncate at 950 to leave
+    room for the count-line and any "...and N more" suffix.
+    """
+    if not user_ids:
+        return "*nobody yet*"
+    lines: list[str] = []
+    used = 0
+    for i, uid in enumerate(user_ids):
+        line = f"<@{uid}>"
+        if used + len(line) + 1 > max_chars:
+            remaining = len(user_ids) - i
+            lines.append(f"…and {remaining} more")
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(lines)
+
+
 def _build_public_embed(
-    game_date: date, signups_close: Optional[datetime], counts: dict[str, int]
+    game_date: date,
+    signups_close: Optional[datetime],
+    buckets: dict[str, list[int]],
 ) -> discord.Embed:
-    playing = counts.get("playing", 0)
-    not_playing = counts.get("not_playing", 0)
-    commentator = counts.get("commentator", 0)
+    playing = buckets.get("playing", [])
+    not_playing = buckets.get("not_playing", [])
+    commentator = buckets.get("commentator", [])
 
     close_line = (
         f"**Signups close:** {signups_close.strftime('%a %b %d, %I:%M %p %Z')}"
@@ -413,13 +439,25 @@ def _build_public_embed(
         ),
         color=discord.Color.blurple(),
     )
-    embed.add_field(name="🎮 Playing", value=f"**{playing}**", inline=True)
-    embed.add_field(name="❌ Not Playing", value=f"**{not_playing}**", inline=True)
-    embed.add_field(name="📺 Commentators", value=f"**{commentator}**", inline=True)
-    if playing >= 10:
+    embed.add_field(
+        name=f"🎮 Playing — **{len(playing)}**",
+        value=_format_user_list(playing),
+        inline=True,
+    )
+    embed.add_field(
+        name=f"❌ Not Playing — **{len(not_playing)}**",
+        value=_format_user_list(not_playing),
+        inline=True,
+    )
+    embed.add_field(
+        name=f"📺 Commentators — **{len(commentator)}**",
+        value=_format_user_list(commentator),
+        inline=True,
+    )
+    if len(playing) >= 10:
         embed.set_footer(text="✅ Enough players to run a match")
-    elif playing > 0:
-        embed.set_footer(text=f"Need {10 - playing} more to run a match")
+    elif playing:
+        embed.set_footer(text=f"Need {10 - len(playing)} more to run a match")
     return embed
 
 
@@ -455,7 +493,7 @@ class RecruitmentCog(commands.Cog):
         if channel is None:
             raise RuntimeError("No recruit channel configured. Use /set-channel recruit first.")
 
-        embed = _build_public_embed(game_date, signups_close_local, counts={})
+        embed = _build_public_embed(game_date, signups_close_local, buckets={})
         view = RsvpView()
         msg = await channel.send(embed=embed, view=view)
 
