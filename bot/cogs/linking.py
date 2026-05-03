@@ -22,7 +22,7 @@ from sqlalchemy import select
 from bot.config import Config, ROLES
 from bot.db.models import MatchPerformance, Player, Rating
 from bot.db.session import get_session
-from bot.services.elo import OVERALL_ROLE, seed_from_rank
+from bot.services.elo import INHOUSE_ROLE, seed_from_rank
 from bot.services.riot_client import RiotAccount, RiotAuthError, RiotClient
 
 log = logging.getLogger(__name__)
@@ -121,7 +121,7 @@ class LinkApprovalView(discord.ui.View):
             player.link_status = "approved"
 
             seed_elo = seed_from_rank(player.solo_tier, player.solo_rank)
-            for role in [*ROLES, OVERALL_ROLE]:
+            for role in [*ROLES, INHOUSE_ROLE]:
                 existing = await db.get(Rating, (target_id, role))
                 if existing is None:
                     db.add(Rating(
@@ -431,7 +431,7 @@ class LinkingCog(commands.Cog):
             player.link_status = "approved"
 
             seed_elo = seed_from_rank(player.solo_tier, player.solo_rank)
-            for role in [*ROLES, OVERALL_ROLE]:
+            for role in [*ROLES, INHOUSE_ROLE]:
                 existing_rating = await db.get(Rating, (member.id, role))
                 if existing_rating is None:
                     db.add(Rating(
@@ -527,15 +527,15 @@ class LinkingCog(commands.Cog):
                 inline=False,
             )
 
-        # Per-role breakdown: stats + elo. Also show OVERALL elo prominently.
+        # Per-role breakdown: stats + elo. Also show INHOUSE elo prominently.
         if ratings:
             ratings_by_role = {r.role: r for r in ratings}
 
-            # Surface the OVERALL elo at the top
-            overall_rating = ratings_by_role.get(OVERALL_ROLE)
+            # Surface the INHOUSE elo at the top
+            overall_rating = ratings_by_role.get(INHOUSE_ROLE)
             if overall_rating:
                 embed.add_field(
-                    name="🏆 Overall Elo",
+                    name="🏆 Inhouse Elo",
                     value=f"**{overall_rating.elo}**",
                     inline=True,
                 )
@@ -640,12 +640,12 @@ def _format_stat_line(stats: dict) -> str:
                 )
                 return
 
-            # Use the OVERALL row's games_played (it's incremented every game,
+            # Use the INHOUSE row's games_played (it's incremented every game,
             # so it equals the total inhouse games)
             from bot.db.models import Rating
             rating_stmt = (
                 select(Rating.discord_id, Rating.games_played)
-                .where(Rating.role == OVERALL_ROLE)
+                .where(Rating.role == INHOUSE_ROLE)
             )
             games_by_player = dict((await db.execute(rating_stmt)).all())
 

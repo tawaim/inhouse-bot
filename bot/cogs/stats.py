@@ -30,8 +30,8 @@ class StatsCog(commands.Cog):
                 select(Rating, Player)
                 .join(Player, Player.discord_id == Rating.discord_id)
                 .where(Rating.games_played > 0)
-                # Always exclude OVERALL — leaderboard ranks by per-role play
-                .where(Rating.role != "OVERALL")
+                # Always exclude INHOUSE — leaderboard ranks by per-role play
+                .where(Rating.role != "INHOUSE")
             )
             if role:
                 rating_stmt = rating_stmt.where(Rating.role == role)

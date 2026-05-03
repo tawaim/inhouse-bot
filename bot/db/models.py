@@ -44,7 +44,7 @@ class Player(Base):
 
 class Rating(Base):
     """One row per (player, role). Chess-style Elo rating.
-    Roles include the 5 standard plus "OVERALL" — a sixth row tracking the
+    Roles include the 5 standard plus "INHOUSE" — a sixth row tracking the
     player's cumulative elo across all roles played.
     """
     __tablename__ = "ratings"

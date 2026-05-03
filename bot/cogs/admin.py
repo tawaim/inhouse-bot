@@ -17,7 +17,7 @@ from bot.db.models import GuildConfig, Match, MatchPerformance, Player, Proposal
 from bot.db.session import get_session
 from bot.services.elo import (
     DEFAULT_ELO,
-    OVERALL_ROLE,
+    INHOUSE_ROLE,
     average_elo,
     seed_from_rank,
     update_elo,
@@ -414,7 +414,7 @@ class AdminCog(commands.Cog):
                     # because that would erase real ratings earned from wins/losses.
                     if rank or player.solo_tier:
                         seed_elo = seed_from_rank(player.solo_tier, player.solo_rank)
-                        for role in [*ROLES, OVERALL_ROLE]:
+                        for role in [*ROLES, INHOUSE_ROLE]:
                             r = await db.get(Rating, (player.discord_id, role))
                             if r is None:
                                 db.add(Rating(
@@ -464,17 +464,17 @@ class AdminCog(commands.Cog):
                     db.add(r)
                 return r
 
-            # Fetch all ratings we'll need: per-role for players + OVERALL for all 10
+            # Fetch all ratings we'll need: per-role for players + INHOUSE for all 10
             t1_role_ratings: dict[str, Rating] = {}
             t2_role_ratings: dict[str, Rating] = {}
             t1_overall: dict[int, Rating] = {}
             t2_overall: dict[int, Rating] = {}
             for role, pid in team1.items():
                 t1_role_ratings[role] = await get_or_create_rating(pid, role)
-                t1_overall[pid] = await get_or_create_rating(pid, OVERALL_ROLE)
+                t1_overall[pid] = await get_or_create_rating(pid, INHOUSE_ROLE)
             for role, pid in team2.items():
                 t2_role_ratings[role] = await get_or_create_rating(pid, role)
-                t2_overall[pid] = await get_or_create_rating(pid, OVERALL_ROLE)
+                t2_overall[pid] = await get_or_create_rating(pid, INHOUSE_ROLE)
 
             # Compute opposing-team averages BEFORE applying any changes,
             # so updates use pre-match values consistently.
@@ -665,8 +665,8 @@ class AdminCog(commands.Cog):
                     )
                     db.add(player)
 
-                # Per-role ratings + OVERALL
-                for role in [*ROLES, OVERALL_ROLE]:
+                # Per-role ratings + INHOUSE
+                for role in [*ROLES, INHOUSE_ROLE]:
                     rating = await db.get(Rating, (fake_id, role))
                     if rating is None:
                         db.add(Rating(

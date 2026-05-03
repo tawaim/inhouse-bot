@@ -7,12 +7,12 @@ Rules
   then stable)
 - Opponent rating: the OPPOSING TEAM'S AVERAGE elo (so each player's elo
   change depends on the team-strength matchup, not just their own role's opponent)
-- Per-role tracking AND an "OVERALL" rating that updates every game regardless
+- Per-role tracking AND an "INHOUSE" rating that updates every game regardless
   of role played
 
 Each match updates TWO rows for each of the 10 players:
   - The role-specific rating (TOP/JUNGLE/MID/BOT/SUPPORT)
-  - The OVERALL rating
+  - The INHOUSE rating
 
 Both updates use the same expected/actual formula but the K-factor and
 opponent rating are computed separately for each scope (role vs. overall),
@@ -29,7 +29,7 @@ K_NEW = 40              # players with < K_THRESHOLD games
 K_ESTABLISHED = 20
 K_THRESHOLD = 10        # games-played boundary
 
-OVERALL_ROLE = "OVERALL"
+INHOUSE_ROLE = "INHOUSE"
 
 # Tier -> elo seed. ~200 between tiers (chess convention: 200 pts ≈ 75% expected
 # win rate). Plus a small division-based bonus (I > IV).
