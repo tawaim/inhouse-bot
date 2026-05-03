@@ -15,7 +15,13 @@ from sqlalchemy import select
 from bot.config import Config, ROLES
 from bot.db.models import GuildConfig, Match, MatchPerformance, Player, ProposalSet, Rating, Session as InhouseSession, Signup
 from bot.db.session import get_session
-from bot.services.elo import ENV, rating_from_db, update_team_ratings
+from bot.services.elo import (
+    DEFAULT_ELO,
+    OVERALL_ROLE,
+    average_elo,
+    seed_from_rank,
+    update_elo,
+)
 from bot.services.ocr import parse_screenshot
 from bot.services.riot_client import RiotAuthError, RiotClient
 
@@ -392,6 +398,7 @@ class AdminCog(commands.Cog):
             )).scalars().all()
             updated = 0
             errors = 0
+            reseeded = 0
             for player in players:
                 try:
                     rank = await self.riot.get_solo_rank(player.riot_puuid)
@@ -401,6 +408,25 @@ class AdminCog(commands.Cog):
                         player.solo_lp = rank.league_points
                     player.riot_last_synced = datetime.utcnow()
                     updated += 1
+
+                    # Re-seed elo for any role this player hasn't yet played in
+                    # an inhouse. Roles with games_played > 0 are NOT touched
+                    # because that would erase real ratings earned from wins/losses.
+                    if rank or player.solo_tier:
+                        seed_elo = seed_from_rank(player.solo_tier, player.solo_rank)
+                        for role in [*ROLES, OVERALL_ROLE]:
+                            r = await db.get(Rating, (player.discord_id, role))
+                            if r is None:
+                                db.add(Rating(
+                                    discord_id=player.discord_id,
+                                    role=role,
+                                    elo=seed_elo,
+                                    games_played=0,
+                                ))
+                                reseeded += 1
+                            elif r.games_played == 0:
+                                r.elo = seed_elo
+                                reseeded += 1
                 except RiotAuthError:
                     await interaction.followup.send("❌ Riot API key rejected. Stop and check key.", ephemeral=True)
                     return
@@ -409,7 +435,8 @@ class AdminCog(commands.Cog):
                     errors += 1
             await db.commit()
         await interaction.followup.send(
-            f"✅ Synced {updated} players ({errors} errors).", ephemeral=True
+            f"✅ Synced {updated} players · re-seeded {reseeded} unplayed roles · {errors} errors",
+            ephemeral=True,
         )
 
     # ---------- internal: commit a match result + run elo update ----------
@@ -429,35 +456,67 @@ class AdminCog(commands.Cog):
             team1: dict[str, int] = {k: int(v) for k, v in json.loads(match.team1_json).items()}
             team2: dict[str, int] = {k: int(v) for k, v in json.loads(match.team2_json).items()}
 
-            # Pull current ratings for each player at the role they played
-            t1_ratings = []
-            t2_ratings = []
-            t1_keys = []   # parallel list of (discord_id, role) for write-back
-            t2_keys = []
-            for role, pid in team1.items():
+            # Helper: get-or-create a rating row, defaulting to DEFAULT_ELO
+            async def get_or_create_rating(pid: int, role: str) -> Rating:
                 r = await db.get(Rating, (pid, role))
                 if r is None:
-                    r = Rating(discord_id=pid, role=role, mu=ENV.mu, sigma=ENV.sigma, games_played=0)
+                    r = Rating(discord_id=pid, role=role, elo=DEFAULT_ELO, games_played=0)
                     db.add(r)
-                t1_ratings.append(rating_from_db(r.mu, r.sigma))
-                t1_keys.append((pid, role, r))
-            for role, pid in team2.items():
-                r = await db.get(Rating, (pid, role))
-                if r is None:
-                    r = Rating(discord_id=pid, role=role, mu=ENV.mu, sigma=ENV.sigma, games_played=0)
-                    db.add(r)
-                t2_ratings.append(rating_from_db(r.mu, r.sigma))
-                t2_keys.append((pid, role, r))
+                return r
 
-            new_t1, new_t2 = update_team_ratings(t1_ratings, t2_ratings, team1_won=(winner == 1))
-            for (pid, role, r), nr in zip(t1_keys, new_t1):
-                r.mu = nr.mu
-                r.sigma = nr.sigma
-                r.games_played += 1
-            for (pid, role, r), nr in zip(t2_keys, new_t2):
-                r.mu = nr.mu
-                r.sigma = nr.sigma
-                r.games_played += 1
+            # Fetch all ratings we'll need: per-role for players + OVERALL for all 10
+            t1_role_ratings: dict[str, Rating] = {}
+            t2_role_ratings: dict[str, Rating] = {}
+            t1_overall: dict[int, Rating] = {}
+            t2_overall: dict[int, Rating] = {}
+            for role, pid in team1.items():
+                t1_role_ratings[role] = await get_or_create_rating(pid, role)
+                t1_overall[pid] = await get_or_create_rating(pid, OVERALL_ROLE)
+            for role, pid in team2.items():
+                t2_role_ratings[role] = await get_or_create_rating(pid, role)
+                t2_overall[pid] = await get_or_create_rating(pid, OVERALL_ROLE)
+
+            # Compute opposing-team averages BEFORE applying any changes,
+            # so updates use pre-match values consistently.
+            t1_role_avg = average_elo([r.elo for r in t1_role_ratings.values()])
+            t2_role_avg = average_elo([r.elo for r in t2_role_ratings.values()])
+            t1_overall_avg = average_elo([r.elo for r in t1_overall.values()])
+            t2_overall_avg = average_elo([r.elo for r in t2_overall.values()])
+
+            team1_won = (winner == 1)
+
+            # Update ratings: each player's role rating moves based on opposing
+            # team's role-rating average; overall rating moves based on opposing
+            # team's overall-rating average.
+            for role, role_rating in t1_role_ratings.items():
+                pid = team1[role]
+                new_role_elo, _ = update_elo(
+                    role_rating.elo, t2_role_avg, won=team1_won, games_played=role_rating.games_played
+                )
+                role_rating.elo = new_role_elo
+                role_rating.games_played += 1
+
+                overall = t1_overall[pid]
+                new_overall_elo, _ = update_elo(
+                    overall.elo, t2_overall_avg, won=team1_won, games_played=overall.games_played
+                )
+                overall.elo = new_overall_elo
+                overall.games_played += 1
+
+            for role, role_rating in t2_role_ratings.items():
+                pid = team2[role]
+                new_role_elo, _ = update_elo(
+                    role_rating.elo, t1_role_avg, won=not team1_won, games_played=role_rating.games_played
+                )
+                role_rating.elo = new_role_elo
+                role_rating.games_played += 1
+
+                overall = t2_overall[pid]
+                new_overall_elo, _ = update_elo(
+                    overall.elo, t1_overall_avg, won=not team1_won, games_played=overall.games_played
+                )
+                overall.elo = new_overall_elo
+                overall.games_played += 1
 
             # Write per-player performance rows. KDA from OCR if available.
             ocr_by_riot_id = {}
@@ -480,13 +539,13 @@ class AdminCog(commands.Cog):
                 k, d, a = await get_kda(pid)
                 db.add(MatchPerformance(
                     match_id=match.id, discord_id=pid, role=role,
-                    kills=k, deaths=d, assists=a, won=(winner == 1),
+                    kills=k, deaths=d, assists=a, won=team1_won,
                 ))
             for role, pid in team2.items():
                 k, d, a = await get_kda(pid)
                 db.add(MatchPerformance(
                     match_id=match.id, discord_id=pid, role=role,
-                    kills=k, deaths=d, assists=a, won=(winner == 2),
+                    kills=k, deaths=d, assists=a, won=not team1_won,
                 ))
 
             match.winner = winner
@@ -494,7 +553,6 @@ class AdminCog(commands.Cog):
             match.reported_at = datetime.utcnow()
             match.screenshot_url = screenshot_url
 
-            # Mark session completed if this was its only match
             session = await db.get(InhouseSession, match.session_id)
             if session and session.status == "matched":
                 session.status = "completed"
@@ -587,18 +645,14 @@ class AdminCog(commands.Cog):
                 ("PLATINUM", "I"),
             ]
 
-            from bot.services.elo import seed_from_rank
-            from bot.config import ROLES
-
             created = []
             for i in range(count):
                 fake_id = 1 + i  # use 1, 2, 3, ... — won't collide with real Discord IDs
                 tier, division = tiers_pool[i % len(tiers_pool)]
-                # Add a little noise so two players with same tier differ slightly
-                seed_mu, seed_sigma = seed_from_rank(tier, division)
-                jitter = rng.uniform(-1.0, 1.0)
+                seed_elo = seed_from_rank(tier, division)
+                # Per-fake jitter so equal-tier players differ slightly
+                jitter = int(rng.uniform(-50, 50))
 
-                # Insert/update fake Player
                 player = await db.get(Player, fake_id)
                 if player is None:
                     player = Player(
@@ -611,15 +665,14 @@ class AdminCog(commands.Cog):
                     )
                     db.add(player)
 
-                # Per-role ratings
-                for role in ROLES:
+                # Per-role ratings + OVERALL
+                for role in [*ROLES, OVERALL_ROLE]:
                     rating = await db.get(Rating, (fake_id, role))
                     if rating is None:
                         db.add(Rating(
                             discord_id=fake_id,
                             role=role,
-                            mu=seed_mu + jitter,
-                            sigma=seed_sigma,
+                            elo=seed_elo + jitter,
                             games_played=0,
                         ))
 

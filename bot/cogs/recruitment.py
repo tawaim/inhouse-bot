@@ -546,9 +546,9 @@ class RecruitmentCog(commands.Cog):
                 ratings = (await db.execute(
                     select(Rating).where(Rating.discord_id == su.discord_id)
                 )).scalars().all()
-                ratings_dict = {r.role: (r.mu, r.sigma) for r in ratings}
+                ratings_dict = {r.role: r.elo for r in ratings}
                 for role in ROLES:
-                    ratings_dict.setdefault(role, (25.0, 8.333))
+                    ratings_dict.setdefault(role, 1200)
                 player_inputs.append(PlayerInput(
                     discord_id=su.discord_id,
                     preferred_roles=su.role_list,
@@ -712,9 +712,9 @@ class RecruitmentCog(commands.Cog):
                 ratings = (await db.execute(
                     select(Rating).where(Rating.discord_id == su.discord_id)
                 )).scalars().all()
-                ratings_dict = {r.role: (r.mu, r.sigma) for r in ratings}
+                ratings_dict = {r.role: r.elo for r in ratings}
                 for role in ROLES:
-                    ratings_dict.setdefault(role, (25.0, 8.333))
+                    ratings_dict.setdefault(role, 1200)
                 player_inputs.append(PlayerInput(
                     discord_id=su.discord_id,
                     preferred_roles=su.role_list,

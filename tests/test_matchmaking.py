@@ -4,18 +4,18 @@ import pytest
 from bot.services.matchmaking import PlayerInput, make_match
 
 
-def make_player(pid: int, prefs: list[str], skill: float = 25.0) -> PlayerInput:
-    """Helper: make a player with the same skill across all roles."""
+def make_player(pid: int, prefs: list[str], skill: int = 1200) -> PlayerInput:
+    """Helper: make a player with the same elo across all roles."""
     return PlayerInput(
         discord_id=pid,
         preferred_roles=prefs,
-        ratings={r: (skill, 0.1) for r in ["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]},
+        ratings={r: skill for r in ["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]},
     )
 
 
 def test_perfect_balance_with_all_fills():
     """10 players, all FILL, all equal skill — should produce balance_diff ~0."""
-    players = [make_player(i, ["FILL"], skill=25.0) for i in range(10)]
+    players = [make_player(i, ["FILL"], skill=1200) for i in range(10)]
     proposal = make_match(players)
     assert proposal is not None
     assert proposal.balance_diff < 0.01

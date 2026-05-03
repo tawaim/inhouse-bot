@@ -20,9 +20,9 @@ from discord.ext import commands
 from sqlalchemy import select
 
 from bot.config import Config, ROLES
-from bot.db.models import Player, Rating
+from bot.db.models import MatchPerformance, Player, Rating
 from bot.db.session import get_session
-from bot.services.elo import seed_from_rank
+from bot.services.elo import OVERALL_ROLE, seed_from_rank
 from bot.services.riot_client import RiotAccount, RiotAuthError, RiotClient
 
 log = logging.getLogger(__name__)
@@ -120,15 +120,14 @@ class LinkApprovalView(discord.ui.View):
             player.riot_last_synced = datetime.utcnow()
             player.link_status = "approved"
 
-            seed_mu, seed_sigma = seed_from_rank(player.solo_tier, player.solo_rank)
-            for role in ROLES:
+            seed_elo = seed_from_rank(player.solo_tier, player.solo_rank)
+            for role in [*ROLES, OVERALL_ROLE]:
                 existing = await db.get(Rating, (target_id, role))
                 if existing is None:
                     db.add(Rating(
                         discord_id=target_id,
                         role=role,
-                        mu=seed_mu,
-                        sigma=seed_sigma,
+                        elo=seed_elo,
                         games_played=0,
                     ))
             await db.commit()
@@ -431,15 +430,14 @@ class LinkingCog(commands.Cog):
             player.riot_last_synced = datetime.utcnow()
             player.link_status = "approved"
 
-            seed_mu, seed_sigma = seed_from_rank(player.solo_tier, player.solo_rank)
-            for role in ROLES:
+            seed_elo = seed_from_rank(player.solo_tier, player.solo_rank)
+            for role in [*ROLES, OVERALL_ROLE]:
                 existing_rating = await db.get(Rating, (member.id, role))
                 if existing_rating is None:
                     db.add(Rating(
                         discord_id=member.id,
                         role=role,
-                        mu=seed_mu,
-                        sigma=seed_sigma,
+                        elo=seed_elo,
                         games_played=0,
                     ))
             await db.commit()
@@ -513,17 +511,97 @@ class LinkingCog(commands.Cog):
         if player.primary_role:
             embed.add_field(name="Main Role", value=player.primary_role, inline=True)
 
+        # Pull per-role performance stats
+        async with get_session() as db:
+            perfs = (await db.execute(
+                select(MatchPerformance).where(MatchPerformance.discord_id == target.id)
+            )).scalars().all()
+        stats_by_role = _aggregate_stats(perfs)
+        overall = _aggregate_stats(perfs, all_roles=True)
+
+        # Overall summary line (if any games played)
+        if overall["games"] > 0:
+            embed.add_field(
+                name="📊 Overall",
+                value=_format_stat_line(overall),
+                inline=False,
+            )
+
+        # Per-role breakdown: stats + elo. Also show OVERALL elo prominently.
         if ratings:
             ratings_by_role = {r.role: r for r in ratings}
+
+            # Surface the OVERALL elo at the top
+            overall_rating = ratings_by_role.get(OVERALL_ROLE)
+            if overall_rating:
+                embed.add_field(
+                    name="🏆 Overall Elo",
+                    value=f"**{overall_rating.elo}**",
+                    inline=True,
+                )
+
             lines = []
             for role in ROLES:
                 r = ratings_by_role.get(role)
+                stats = stats_by_role.get(role, {"games": 0, "wins": 0, "losses": 0, "k": 0, "d": 0, "a": 0})
                 if r:
-                    skill = r.mu - 3 * r.sigma
-                    lines.append(f"**{role}**: {skill:.1f} (μ={r.mu:.1f}, σ={r.sigma:.1f}) · {r.games_played} games")
-            embed.add_field(name="Inhouse Elo", value="\n".join(lines) or "No ratings yet", inline=False)
+                    elo_label = f"Elo **{r.elo}**"
+                    if stats["games"] == 0:
+                        lines.append(f"**{role}** — *no games yet* · {elo_label} (starting)")
+                    else:
+                        lines.append(f"**{role}** — {_format_stat_line(stats)} · {elo_label}")
+            embed.add_field(name="By Role", value="\n".join(lines) or "No ratings yet", inline=False)
 
         await interaction.response.send_message(embed=embed)
+
+
+def _aggregate_stats(perfs: list, all_roles: bool = False) -> dict | dict[str, dict]:
+    """Aggregate match performances into per-role stats dicts.
+    If all_roles=True, returns a single dict aggregating across all roles.
+    Otherwise returns dict[role, dict].
+    """
+    if all_roles:
+        bucket = {"games": 0, "wins": 0, "losses": 0, "k": 0, "d": 0, "a": 0}
+        for p in perfs:
+            bucket["games"] += 1
+            if p.won:
+                bucket["wins"] += 1
+            else:
+                bucket["losses"] += 1
+            bucket["k"] += p.kills or 0
+            bucket["d"] += p.deaths or 0
+            bucket["a"] += p.assists or 0
+        return bucket
+
+    by_role: dict[str, dict] = {}
+    for p in perfs:
+        b = by_role.setdefault(p.role, {"games": 0, "wins": 0, "losses": 0, "k": 0, "d": 0, "a": 0})
+        b["games"] += 1
+        if p.won:
+            b["wins"] += 1
+        else:
+            b["losses"] += 1
+        b["k"] += p.kills or 0
+        b["d"] += p.deaths or 0
+        b["a"] += p.assists or 0
+    return by_role
+
+
+def _format_stat_line(stats: dict) -> str:
+    """Render a stats dict as a one-line string. Handles missing KDA gracefully."""
+    games = stats["games"]
+    if games == 0:
+        return "no games"
+    wins, losses = stats["wins"], stats["losses"]
+    wr = (wins / games * 100) if games else 0
+    line = f"{games} games · {wins}W-{losses}L ({wr:.0f}%)"
+    if stats["k"] or stats["d"] or stats["a"]:
+        avg_k = stats["k"] / games
+        avg_d = stats["d"] / games
+        avg_a = stats["a"] / games
+        kda = (avg_k + avg_a) / max(avg_d, 1.0)
+        line += f" · {avg_k:.1f}/{avg_d:.1f}/{avg_a:.1f} ({kda:.1f} KDA)"
+    return line
 
     @app_commands.command(
         name="admin-list-players",
@@ -562,12 +640,12 @@ class LinkingCog(commands.Cog):
                 )
                 return
 
-            # Pull rating game-counts in one query so we don't N+1
+            # Use the OVERALL row's games_played (it's incremented every game,
+            # so it equals the total inhouse games)
             from bot.db.models import Rating
-            from sqlalchemy import func as sql_func
             rating_stmt = (
-                select(Rating.discord_id, sql_func.sum(Rating.games_played))
-                .group_by(Rating.discord_id)
+                select(Rating.discord_id, Rating.games_played)
+                .where(Rating.role == OVERALL_ROLE)
             )
             games_by_player = dict((await db.execute(rating_stmt)).all())
 

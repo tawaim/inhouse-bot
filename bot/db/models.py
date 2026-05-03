@@ -43,13 +43,15 @@ class Player(Base):
 
 
 class Rating(Base):
-    """One row per (player, role). TrueSkill mu/sigma."""
+    """One row per (player, role). Chess-style Elo rating.
+    Roles include the 5 standard plus "OVERALL" — a sixth row tracking the
+    player's cumulative elo across all roles played.
+    """
     __tablename__ = "ratings"
 
     discord_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("players.discord_id"), primary_key=True)
     role: Mapped[str] = mapped_column(String(8), primary_key=True)
-    mu: Mapped[float] = mapped_column(Float, default=25.0)
-    sigma: Mapped[float] = mapped_column(Float, default=8.333)
+    elo: Mapped[int] = mapped_column(Integer, default=1200)
     games_played: Mapped[int] = mapped_column(Integer, default=0)
 
     player: Mapped[Player] = relationship(back_populates="ratings")

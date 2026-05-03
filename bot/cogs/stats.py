@@ -8,16 +8,16 @@ from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import select
 
-from bot.db.models import Player, Rating
+from bot.db.models import MatchPerformance, Player, Rating
 from bot.db.session import get_session
-from bot.services.elo import conservative_skill
+# elo is just an int; no import needed
 
 
 class StatsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="leaderboard", description="Inhouse elo leaderboard.")
+    @app_commands.command(name="leaderboard", description="Inhouse leaderboard with wins, games, and elo.")
     @app_commands.describe(role="Filter by a specific role (optional)")
     async def leaderboard(
         self,
@@ -26,50 +26,80 @@ class StatsCog(commands.Cog):
     ):
         await interaction.response.defer()
         async with get_session() as db:
+            rating_stmt = (
+                select(Rating, Player)
+                .join(Player, Player.discord_id == Rating.discord_id)
+                .where(Rating.games_played > 0)
+                # Always exclude OVERALL — leaderboard ranks by per-role play
+                .where(Rating.role != "OVERALL")
+            )
             if role:
-                ratings = (await db.execute(
-                    select(Rating, Player)
-                    .join(Player, Player.discord_id == Rating.discord_id)
-                    .where(Rating.role == role)
-                    .where(Rating.games_played > 0)
-                )).all()
-                # Sort by conservative skill, top 15
-                ratings.sort(key=lambda r: conservative_skill(r[0].mu, r[0].sigma), reverse=True)
-                ratings = ratings[:15]
-                lines = []
-                for i, (rating, player) in enumerate(ratings, 1):
-                    skill = conservative_skill(rating.mu, rating.sigma)
-                    name = player.riot_game_name or f"<@{player.discord_id}>"
-                    lines.append(f"`{i:>2}.` {skill:>5.1f}  **{name}** · {rating.games_played} games")
-                embed = discord.Embed(
-                    title=f"🏆 Leaderboard — {role}",
-                    description="\n".join(lines) or "No games played yet.",
-                    color=discord.Color.gold(),
-                )
+                rating_stmt = rating_stmt.where(Rating.role == role)
+            rating_rows = (await db.execute(rating_stmt)).all()
+
+            perf_stmt = select(MatchPerformance)
+            if role:
+                perf_stmt = perf_stmt.where(MatchPerformance.role == role)
+            perfs = (await db.execute(perf_stmt)).scalars().all()
+
+        # Tally W/L per (discord_id, role) from match_performances
+        wl_by_key: dict[tuple[int, str], dict] = {}
+        for p in perfs:
+            key = (p.discord_id, p.role)
+            b = wl_by_key.setdefault(key, {"wins": 0, "losses": 0})
+            if p.won:
+                b["wins"] += 1
             else:
-                # Aggregate across all roles: best per player
-                rows = (await db.execute(
-                    select(Player, Rating)
-                    .join(Rating, Rating.discord_id == Player.discord_id)
-                    .where(Rating.games_played > 0)
-                )).all()
-                best_by_player: dict[int, tuple[Player, Rating, float]] = {}
-                for player, rating in rows:
-                    skill = conservative_skill(rating.mu, rating.sigma)
-                    cur = best_by_player.get(player.discord_id)
-                    if cur is None or skill > cur[2]:
-                        best_by_player[player.discord_id] = (player, rating, skill)
-                ranked = sorted(best_by_player.values(), key=lambda x: x[2], reverse=True)[:15]
-                lines = []
-                for i, (player, rating, skill) in enumerate(ranked, 1):
-                    name = player.riot_game_name or f"<@{player.discord_id}>"
-                    lines.append(
-                        f"`{i:>2}.` {skill:>5.1f}  **{name}** · best: {rating.role} · "
-                        f"{rating.games_played} games"
-                    )
-                embed = discord.Embed(
-                    title="🏆 Inhouse Leaderboard (best role per player)",
-                    description="\n".join(lines) or "No games played yet.",
-                    color=discord.Color.gold(),
+                b["losses"] += 1
+
+        if role:
+            rows = []
+            for rating, player in rating_rows:
+                skill = float(rating.elo)
+                wl = wl_by_key.get((player.discord_id, role), {"wins": 0, "losses": 0})
+                rows.append((rating, player, skill, wl["wins"], wl["losses"]))
+            rows.sort(key=lambda r: r[2], reverse=True)
+            rows = rows[:15]
+
+            lines = []
+            for i, (rating, player, skill, wins, losses) in enumerate(rows, 1):
+                name = player.riot_game_name or f"<@{player.discord_id}>"
+                games = rating.games_played
+                wr = (wins / games * 100) if games else 0
+                lines.append(
+                    f"`{i:>2}.` **{name}** · {wins}W-{losses}L ({wr:.0f}%) · "
+                    f"{games} games · Elo {skill:.0f}"
                 )
+            embed = discord.Embed(
+                title=f"🏆 Leaderboard — {role}",
+                description="\n".join(lines) or "No games played yet.",
+                color=discord.Color.gold(),
+            )
+        else:
+            # Best role per player, ranked by skill
+            best_by_player: dict[int, tuple[Player, Rating, float, int, int]] = {}
+            for rating, player in rating_rows:
+                skill = float(rating.elo)
+                wl = wl_by_key.get((player.discord_id, rating.role), {"wins": 0, "losses": 0})
+                cur = best_by_player.get(player.discord_id)
+                if cur is None or skill > cur[2]:
+                    best_by_player[player.discord_id] = (
+                        player, rating, skill, wl["wins"], wl["losses"]
+                    )
+            ranked = sorted(best_by_player.values(), key=lambda x: x[2], reverse=True)[:15]
+
+            lines = []
+            for i, (player, rating, skill, wins, losses) in enumerate(ranked, 1):
+                name = player.riot_game_name or f"<@{player.discord_id}>"
+                games = rating.games_played
+                wr = (wins / games * 100) if games else 0
+                lines.append(
+                    f"`{i:>2}.` **{name}** · {wins}W-{losses}L ({wr:.0f}%) · "
+                    f"{games} games on {rating.role} · Elo {skill:.0f}"
+                )
+            embed = discord.Embed(
+                title="🏆 Inhouse Leaderboard (best role per player)",
+                description="\n".join(lines) or "No games played yet.",
+                color=discord.Color.gold(),
+            )
         await interaction.followup.send(embed=embed)

@@ -29,14 +29,13 @@ from dataclasses import dataclass
 from typing import Optional
 
 from bot.config import ROLES
-from bot.services.elo import conservative_skill
 
 
 @dataclass
 class PlayerInput:
     discord_id: int
     preferred_roles: list[str]   # subset of ROLES, or ["FILL"] meaning all 5
-    ratings: dict[str, tuple[float, float]]  # role -> (mu, sigma)
+    ratings: dict[str, int]      # role -> elo (chess-style, e.g. 1200)
 
     def can_play(self, role: str) -> bool:
         if "FILL" in self.preferred_roles:
@@ -44,8 +43,7 @@ class PlayerInput:
         return role in self.preferred_roles
 
     def skill_at(self, role: str) -> float:
-        mu, sigma = self.ratings.get(role, (25.0, 8.333))
-        return conservative_skill(mu, sigma)
+        return float(self.ratings.get(role, 1200))
 
 
 @dataclass
