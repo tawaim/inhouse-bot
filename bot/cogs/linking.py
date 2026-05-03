@@ -45,10 +45,8 @@ class LinkApprovalView(discord.ui.View):
         self.riot = riot
         self.bot = bot
 
-    async def _is_admin(self, interaction: discord.Interaction) -> bool:
-        if not isinstance(interaction.user, discord.Member):
-            return False
-        return any(r.name == self.config.admin_role_name for r in interaction.user.roles)
+    async def _is_owner(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.config.owner_discord_id
 
     @staticmethod
     def _extract_target_from_message(message: discord.Message) -> Optional[int]:
@@ -77,8 +75,8 @@ class LinkApprovalView(discord.ui.View):
 
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.green, emoji="✅", custom_id="link_approve")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._is_admin(interaction):
-            await interaction.response.send_message("League Admin only.", ephemeral=True)
+        if not await self._is_owner(interaction):
+            await interaction.response.send_message("Bot owner only.", ephemeral=True)
             return
         await interaction.response.defer()
 
@@ -157,8 +155,8 @@ class LinkApprovalView(discord.ui.View):
 
     @discord.ui.button(label="Reject", style=discord.ButtonStyle.red, emoji="❌", custom_id="link_reject")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._is_admin(interaction):
-            await interaction.response.send_message("League Admin only.", ephemeral=True)
+        if not await self._is_owner(interaction):
+            await interaction.response.send_message("Bot owner only.", ephemeral=True)
             return
         target_id = self._extract_target_from_message(interaction.message)
         riot_id_display = self._extract_riot_id_from_message(interaction.message)
