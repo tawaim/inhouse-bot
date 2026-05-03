@@ -1,21 +1,22 @@
-# Fly.io config — fill in app name with `fly launch` or edit before first deploy.
-app = "inhouse-league-bot"
-primary_region = "atl"   # Atlanta — closest to user. Use `fly platform regions` to see all.
+# fly.toml app configuration file for inhouse-league-bot
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+
+app = 'inhouse-league-bot'
+primary_region = 'dfw'
 
 [build]
 
 [env]
-  TZ = "America/New_York"
+  TZ = 'America/New_York'
 
-# Persistent volume for SQLite
 [[mounts]]
-  source = "inhouse_data"
-  destination = "/data"
+  source = 'inhouse_data'
+  destination = '/data'
 
-# Bot is outbound-only — no public HTTP, no services block.
-# Fly will keep the process running via the VM's machine state.
-
+# This is a worker-only app (Discord bot, outbound WebSocket).
+# No HTTP service. Machine should stay running 24/7.
 [[vm]]
-  cpu_kind = "shared"
+  memory = '512mb'
+  cpu_kind = 'shared'
   cpus = 1
-  memory = "256mb"
