@@ -524,3 +524,102 @@ class LinkingCog(commands.Cog):
             embed.add_field(name="Inhouse Elo", value="\n".join(lines) or "No ratings yet", inline=False)
 
         await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(
+        name="admin-list-players",
+        description="(admin) Show all linked players with their rank and inhouse elo.",
+    )
+    @app_commands.describe(
+        filter="Which players to show (default: approved)",
+    )
+    async def admin_list_players(
+        self,
+        interaction: discord.Interaction,
+        filter: Optional[str] = "approved",
+    ):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        if filter not in ("approved", "pending", "all"):
+            await interaction.response.send_message(
+                "filter must be one of: approved, pending, all", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        async with get_session() as db:
+            stmt = select(Player).where(Player.riot_puuid.is_not(None))
+            if filter == "approved":
+                stmt = stmt.where(Player.link_status == "approved")
+            elif filter == "pending":
+                stmt = stmt.where(Player.link_status == "pending")
+            stmt = stmt.order_by(Player.riot_game_name.asc())
+            players = (await db.execute(stmt)).scalars().all()
+
+            if not players:
+                await interaction.followup.send(
+                    f"No players found (filter: {filter}).", ephemeral=True
+                )
+                return
+
+            # Pull rating game-counts in one query so we don't N+1
+            from bot.db.models import Rating
+            from sqlalchemy import func as sql_func
+            rating_stmt = (
+                select(Rating.discord_id, sql_func.sum(Rating.games_played))
+                .group_by(Rating.discord_id)
+            )
+            games_by_player = dict((await db.execute(rating_stmt)).all())
+
+        # Build output. Discord embed field values cap at 1024 chars; if the list
+        # is long we split across multiple fields.
+        lines: list[str] = []
+        for p in players:
+            mention = f"<@{p.discord_id}>"
+            riot = f"`{p.riot_game_name}#{p.riot_tag_line}`"
+            rank = (
+                f"{p.solo_tier} {p.solo_rank}" if p.solo_tier
+                else "Unranked"
+            )
+            role = p.primary_role or "?"
+            games = games_by_player.get(p.discord_id, 0) or 0
+            status_marker = "⏳ " if p.link_status == "pending" else ""
+            lines.append(
+                f"{status_marker}{mention} · {riot} · {rank} · main: {role} · {games} inhouse games"
+            )
+
+        title_filter = {
+            "approved": "Approved",
+            "pending": "Pending Approval",
+            "all": "All",
+        }[filter]
+        embed = discord.Embed(
+            title=f"📋 Linked Players ({title_filter}) — {len(players)} total",
+            color=discord.Color.blurple(),
+        )
+
+        # Pack lines into fields, respecting Discord's 1024 char/field cap
+        chunks: list[str] = []
+        current = ""
+        for line in lines:
+            if len(current) + len(line) + 1 > 1000:
+                chunks.append(current)
+                current = line
+            else:
+                current = f"{current}\n{line}" if current else line
+        if current:
+            chunks.append(current)
+
+        # Discord allows up to 25 fields per embed; in practice we'll hit message
+        # length limits long before that, but cap defensively.
+        for i, chunk in enumerate(chunks[:25]):
+            embed.add_field(
+                name=f"Players {i+1}/{len(chunks)}" if len(chunks) > 1 else "\u200b",
+                value=chunk,
+                inline=False,
+            )
+
+        if len(chunks) > 25:
+            embed.set_footer(text=f"Showing first 25 chunks; {len(players)} players total.")
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
