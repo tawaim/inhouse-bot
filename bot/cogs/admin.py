@@ -384,7 +384,7 @@ class AdminCog(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="sync-ranks", description="(admin) Refresh Riot rank for all linked players. Updates base_seed only; inhouse_modifier untouched.")
+    @app_commands.command(name="sync-ranks", description="(admin) Refresh Riot rank for all linked players. Updates base_seed only.")
     async def sync_ranks(self, interaction: discord.Interaction):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("League Admin only.", ephemeral=True)
