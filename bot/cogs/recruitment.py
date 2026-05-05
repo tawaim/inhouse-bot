@@ -512,7 +512,21 @@ class RecruitmentCog(commands.Cog):
         return session
 
     async def close_signups_and_match(self, session_id: int) -> None:
-        """Lock the session, run matchmaker on Playing signups, post teams."""
+        """Lock the session, refresh everyone's base_seed from current Riot rank,
+        then run matchmaker on Playing signups, post teams."""
+        # Refresh base_seed for all linked players BEFORE running matchmaker.
+        # This is the "weekly auto-refresh" — solo queue rank changes between
+        # Mondays now influence elo before matchmaking.
+        try:
+            admin_cog = self.bot.get_cog("AdminCog")
+            if admin_cog is not None and hasattr(admin_cog, "_refresh_all_base_seeds"):
+                result = await admin_cog._refresh_all_base_seeds()
+                log.info("Pre-matchmaking sync: %s", result)
+            else:
+                log.warning("AdminCog._refresh_all_base_seeds not available; skipping pre-matchmaking sync")
+        except Exception:
+            log.exception("Pre-matchmaking base_seed refresh failed; continuing with stale ratings")
+
         async with get_session() as db:
             session = await db.get(InhouseSession, session_id)
             if session is None or session.status != "recruiting":

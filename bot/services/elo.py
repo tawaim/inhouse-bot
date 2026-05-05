@@ -31,8 +31,12 @@ K_THRESHOLD = 10        # games-played boundary
 
 INHOUSE_ROLE = "INHOUSE"
 
-# Tier -> elo seed. ~200 between tiers (chess convention: 200 pts ≈ 75% expected
-# win rate). Plus a small division-based bonus (I > IV).
+# Linear ladder. Each tier is 200 wide and divided into 4 divisions of 50
+# elo each (IV = bottom, III, II, I = top). Master/GM/Challenger are flat
+# (no divisions in League), so they sit at the bottom of their tier and the
+# top of GM is the start of Challenger, etc.
+#
+# Bottom of each tier (i.e., "Tier IV"):
 TIER_SEED = {
     "IRON":         800,
     "BRONZE":      1000,
@@ -42,10 +46,19 @@ TIER_SEED = {
     "EMERALD":     1800,
     "DIAMOND":     2000,
     "MASTER":      2200,
-    "GRANDMASTER": 2400,
-    "CHALLENGER":  2600,
+    "GRANDMASTER": 2300,
+    "CHALLENGER":  2500,
 }
-DIVISION_BONUS = {"I": 75, "II": 50, "III": 25, "IV": 0}
+# 50 elo per division. IV = bottom (0), I = top (150).
+# Plat IV=1600, Plat III=1650, Plat II=1700, Plat I=1750, Emerald IV=1800.
+DIVISION_BONUS = {"I": 150, "II": 100, "III": 50, "IV": 0}
+
+# Master/GM/Challenger don't have divisions; treat them as flat-tier seeds.
+_FLAT_TIERS = {"MASTER", "GRANDMASTER", "CHALLENGER"}
+
+# How much elo we knock off when seeding from last-season (rust penalty).
+# Equivalent to one full tier (4 divisions = 200 elo).
+RUST_PENALTY = 200
 
 
 def seed_from_rank(tier: Optional[str], division: Optional[str]) -> int:
@@ -54,10 +67,31 @@ def seed_from_rank(tier: Optional[str], division: Optional[str]) -> int:
     """
     if not tier:
         return DEFAULT_ELO
-    base = TIER_SEED.get(tier.upper())
+    tier = tier.upper()
+    base = TIER_SEED.get(tier)
     if base is None:
         return DEFAULT_ELO
+    if tier in _FLAT_TIERS:
+        # Master/GM/Challenger are flat — no division offset
+        return base
     return base + DIVISION_BONUS.get((division or "IV").upper(), 0)
+
+
+def seed_from_historical_rank(tier: Optional[str]) -> int:
+    """Seed from last-season's `highestTierAchieved` field, applying a
+    fixed -200 elo rust penalty (one full tier worth of rust).
+
+    No division info is available on `highestTierAchieved`, so we treat
+    it as bottom-of-tier (IV-equivalent) before applying the penalty.
+    Floored at IRON's seed value — can't go lower than 800.
+    """
+    if not tier:
+        return DEFAULT_ELO
+    tier = tier.upper()
+    base = TIER_SEED.get(tier)
+    if base is None:
+        return DEFAULT_ELO
+    return max(TIER_SEED["IRON"], base - RUST_PENALTY)
 
 
 def expected_score(player_elo: int, opponent_elo: int) -> float:

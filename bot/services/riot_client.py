@@ -40,6 +40,13 @@ class RankEntry:
 
 
 @dataclass
+class HistoricalRank:
+    """Last season's peak rank, exposed by league-v4 even for currently-unranked players."""
+    queue_type: str
+    tier: str         # e.g. "DIAMOND" — note no rank/division on historical
+
+
+@dataclass
 class MatchSummary:
     """Subset of match-v5 fields we care about for skill signals."""
     match_id: str
@@ -143,6 +150,28 @@ class RiotClient:
         for entry in await self.get_ranked_entries(puuid):
             if entry.queue_type == "RANKED_SOLO_5x5":
                 return entry
+        return None
+
+    async def get_historical_solo_rank(self, puuid: str) -> Optional[HistoricalRank]:
+        """Return the player's most recent solo-queue 'highestTierAchieved'
+        from league-v4. Riot exposes this even on currently-unplaced entries
+        (i.e., players who have placement matches in but haven't played enough
+        to fully rank). Returns None if no info is available — a fully untouched
+        account with no historical participation will not have this exposed.
+        """
+        url = (
+            f"https://{self.region}.api.riotgames.com"
+            f"/lol/league/v4/entries/by-puuid/{puuid}"
+        )
+        data = await self._get(url)
+        if not data:
+            return None
+        for e in data:
+            if e.get("queueType") == "RANKED_SOLO_5x5" and e.get("highestTierAchieved"):
+                return HistoricalRank(
+                    queue_type="RANKED_SOLO_5x5",
+                    tier=e["highestTierAchieved"],
+                )
         return None
 
     # --- match-v5 (regional) ---

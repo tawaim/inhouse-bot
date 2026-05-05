@@ -22,7 +22,7 @@ from sqlalchemy import select
 from bot.config import Config, ROLES
 from bot.db.models import MatchPerformance, Player, Rating
 from bot.db.session import get_session
-from bot.services.elo import INHOUSE_ROLE, seed_from_rank
+from bot.services.elo import INHOUSE_ROLE, seed_from_historical_rank, seed_from_rank
 from bot.services.riot_client import RiotAccount, RiotAuthError, RiotClient
 
 log = logging.getLogger(__name__)
@@ -101,6 +101,9 @@ class LinkApprovalView(discord.ui.View):
 
         try:
             rank = await self.riot.get_solo_rank(puuid)
+            historical = None
+            if rank is None:
+                historical = await self.riot.get_historical_solo_rank(puuid)
             primary_role = await self.riot.infer_primary_role(puuid)
         except RiotAuthError:
             await interaction.followup.send(
@@ -113,6 +116,15 @@ class LinkApprovalView(discord.ui.View):
             player = await db.get(Player, target_id)
             if player is None:
                 return
+            # Detect whether this is a re-link of a DIFFERENT account
+            # (vs same account). If different, we'll reseed elo on existing
+            # Rating rows while preserving games_played.
+            new_puuid = player.riot_puuid  # already populated by /link
+            account_changed = (
+                player.previous_riot_puuid is not None
+                and player.previous_riot_puuid != new_puuid
+            )
+
             player.solo_tier = rank.tier if rank else None
             player.solo_rank = rank.rank if rank else None
             player.solo_lp = rank.league_points if rank else None
@@ -120,21 +132,48 @@ class LinkApprovalView(discord.ui.View):
             player.riot_last_synced = datetime.utcnow()
             player.link_status = "approved"
 
-            seed_elo = seed_from_rank(player.solo_tier, player.solo_rank)
+            # Seed elo: prefer current rank, fall back to historical (with rust
+            # penalty), default to 1200 if neither is available.
+            if rank:
+                seed_elo = seed_from_rank(player.solo_tier, player.solo_rank)
+            elif historical:
+                seed_elo = seed_from_historical_rank(historical.tier)
+            else:
+                seed_elo = 1200
+            player.last_synced_seed_elo = seed_elo
+
             for role in [*ROLES, INHOUSE_ROLE]:
                 existing = await db.get(Rating, (target_id, role))
                 if existing is None:
+                    # First time linking — create the row with base_seed=seed,
+                    # modifier=0, displayed elo = seed
                     db.add(Rating(
                         discord_id=target_id,
                         role=role,
                         elo=seed_elo,
+                        base_seed=seed_elo,
+                        inhouse_modifier=0,
                         games_played=0,
                     ))
+                elif account_changed:
+                    # Different account — update base_seed only, keep modifier
+                    # and games_played intact. Recompute displayed elo.
+                    existing.base_seed = seed_elo
+                    existing.elo = existing.base_seed + existing.inhouse_modifier
+                # else: same account being re-linked, keep everything as-is
+
+            # Now that we've used previous_riot_puuid, clear it
+            player.previous_riot_puuid = None
             await db.commit()
 
         for child in self.children:
             child.disabled = True
-        rank_str = f"{rank.tier} {rank.rank} ({rank.league_points} LP)" if rank else "Unranked"
+        if rank:
+            rank_str = f"{rank.tier} {rank.rank} ({rank.league_points} LP)"
+        elif historical:
+            rank_str = f"Unranked this split — last season {historical.tier} (seeded -200 elo for rust)"
+        else:
+            rank_str = "Unranked (seeded at default 1200)"
         embed = interaction.message.embeds[0] if interaction.message.embeds else discord.Embed()
         embed.color = discord.Color.green()
         embed.add_field(
@@ -409,6 +448,9 @@ class LinkingCog(commands.Cog):
 
         try:
             rank = await self.riot.get_solo_rank(account.puuid)
+            historical = None
+            if rank is None:
+                historical = await self.riot.get_historical_solo_rank(account.puuid)
             primary_role = await self.riot.infer_primary_role(account.puuid)
         except RiotAuthError:
             await interaction.followup.send("Riot API rejected our key.", ephemeral=True)
@@ -419,6 +461,10 @@ class LinkingCog(commands.Cog):
             if player is None:
                 player = Player(discord_id=member.id)
                 db.add(player)
+            account_changed = (
+                player.previous_riot_puuid is not None
+                and player.previous_riot_puuid != account.puuid
+            )
             player.riot_game_name = account.game_name
             player.riot_tag_line = account.tag_line
             player.riot_puuid = account.puuid
@@ -430,7 +476,14 @@ class LinkingCog(commands.Cog):
             player.riot_last_synced = datetime.utcnow()
             player.link_status = "approved"
 
-            seed_elo = seed_from_rank(player.solo_tier, player.solo_rank)
+            if rank:
+                seed_elo = seed_from_rank(player.solo_tier, player.solo_rank)
+            elif historical:
+                seed_elo = seed_from_historical_rank(historical.tier)
+            else:
+                seed_elo = 1200
+            player.last_synced_seed_elo = seed_elo
+
             for role in [*ROLES, INHOUSE_ROLE]:
                 existing_rating = await db.get(Rating, (member.id, role))
                 if existing_rating is None:
@@ -438,8 +491,14 @@ class LinkingCog(commands.Cog):
                         discord_id=member.id,
                         role=role,
                         elo=seed_elo,
+                        base_seed=seed_elo,
+                        inhouse_modifier=0,
                         games_played=0,
                     ))
+                elif account_changed:
+                    existing_rating.base_seed = seed_elo
+                    existing_rating.elo = existing_rating.base_seed + existing_rating.inhouse_modifier
+            player.previous_riot_puuid = None
             await db.commit()
 
         rank_str = f"{rank.tier} {rank.rank} ({rank.league_points} LP)" if rank else "Unranked"
@@ -457,19 +516,23 @@ class LinkingCog(commands.Cog):
                 await interaction.response.send_message("You have no linked Riot account.", ephemeral=True)
                 return
             was_pending = player.link_status == "pending"
+            # Remember the unlinked PUUID so we can detect "re-linking same account"
+            # vs "switched accounts" on the next /link.
+            player.previous_riot_puuid = player.riot_puuid
             player.riot_puuid = None
             player.riot_game_name = None
             player.riot_tag_line = None
             player.solo_tier = None
             player.solo_rank = None
             player.solo_lp = None
+            player.last_synced_seed_elo = None
             player.link_status = "approved"  # so a future /link doesn't see them as pending
             await db.commit()
 
         msg = "Riot account unlinked."
         if was_pending:
             msg += " (Pending request cancelled.)"
-        msg += " Inhouse elo preserved."
+        msg += " Inhouse games_played preserved; elo will be reseeded if you re-link a different account."
         await interaction.response.send_message(msg, ephemeral=True)
 
     @app_commands.command(name="profile", description="Show your inhouse profile.")
@@ -534,10 +597,19 @@ class LinkingCog(commands.Cog):
             # Surface the INHOUSE elo at the top
             overall_rating = ratings_by_role.get(INHOUSE_ROLE)
             if overall_rating:
+                modifier_str = (
+                    f"({overall_rating.inhouse_modifier:+d})"
+                    if overall_rating.inhouse_modifier != 0
+                    else ""
+                )
                 embed.add_field(
                     name="🏆 Inhouse Elo",
-                    value=f"**{overall_rating.elo}**",
-                    inline=True,
+                    value=(
+                        f"**{overall_rating.elo}** {modifier_str}\n"
+                        f"Base from rank: {overall_rating.base_seed}\n"
+                        f"Inhouse W/L: {overall_rating.inhouse_modifier:+d}"
+                    ),
+                    inline=False,
                 )
 
             lines = []
@@ -545,9 +617,10 @@ class LinkingCog(commands.Cog):
                 r = ratings_by_role.get(role)
                 stats = stats_by_role.get(role, {"games": 0, "wins": 0, "losses": 0, "k": 0, "d": 0, "a": 0})
                 if r:
-                    elo_label = f"Elo **{r.elo}**"
+                    mod_str = f"({r.inhouse_modifier:+d})" if r.inhouse_modifier != 0 else ""
+                    elo_label = f"Elo **{r.elo}** {mod_str}".strip()
                     if stats["games"] == 0:
-                        lines.append(f"**{role}** — *no games yet* · {elo_label} (starting)")
+                        lines.append(f"**{role}** — *no games yet* · {elo_label}")
                     else:
                         lines.append(f"**{role}** — {_format_stat_line(stats)} · {elo_label}")
             embed.add_field(name="By Role", value="\n".join(lines) or "No ratings yet", inline=False)
@@ -701,3 +774,102 @@ def _format_stat_line(stats: dict) -> str:
             embed.set_footer(text=f"Showing first 25 chunks; {len(players)} players total.")
 
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(
+        name="admin-list-elos",
+        description="(admin) Show every linked player and all 6 elos (TOP/JG/MID/BOT/SUP/INHOUSE).",
+    )
+    @app_commands.describe(sort_by="What to sort the table by (default: inhouse elo descending)")
+    async def admin_list_elos(
+        self,
+        interaction: discord.Interaction,
+        sort_by: Optional[str] = "inhouse",
+    ):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        sort_by = (sort_by or "inhouse").lower()
+        valid_sorts = {"inhouse", "top", "jungle", "mid", "bot", "support", "name"}
+        if sort_by not in valid_sorts:
+            await interaction.response.send_message(
+                f"sort_by must be one of: {', '.join(sorted(valid_sorts))}",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        async with get_session() as db:
+            players = (await db.execute(
+                select(Player).where(
+                    Player.riot_puuid.is_not(None),
+                    Player.link_status == "approved",
+                ).order_by(Player.riot_game_name.asc())
+            )).scalars().all()
+            ratings = (await db.execute(select(Rating))).scalars().all()
+
+        if not players:
+            await interaction.followup.send("No linked players yet.", ephemeral=True)
+            return
+
+        # Index ratings: discord_id -> {role: (elo, modifier)}
+        elos_by_player: dict[int, dict[str, tuple[int, int]]] = {}
+        for r in ratings:
+            elos_by_player.setdefault(r.discord_id, {})[r.role] = (r.elo, r.inhouse_modifier)
+
+        # Build rows: (name, top, jg, mid, bot, sup, inhouse, ih_mod)
+        rows = []
+        for p in players:
+            e = elos_by_player.get(p.discord_id, {})
+            name = p.riot_game_name or f"<@{p.discord_id}>"
+            ih_elo, ih_mod = e.get("INHOUSE", (1200, 0))
+            rows.append({
+                "name": name,
+                "top": e.get("TOP", (1200, 0))[0],
+                "jungle": e.get("JUNGLE", (1200, 0))[0],
+                "mid": e.get("MID", (1200, 0))[0],
+                "bot": e.get("BOT", (1200, 0))[0],
+                "support": e.get("SUPPORT", (1200, 0))[0],
+                "inhouse": ih_elo,
+                "ih_mod": ih_mod,
+            })
+
+        if sort_by == "name":
+            rows.sort(key=lambda r: r["name"].lower())
+        else:
+            rows.sort(key=lambda r: r[sort_by], reverse=True)
+
+        # Fixed-width table inside a code block. Last column shows the +/-
+        # modifier on the INHOUSE rating so you can see how each player has
+        # done in inhouses regardless of solo queue rank changes.
+        header = f"{'Player':<14} {'TOP':>5} {'JG':>5} {'MID':>5} {'BOT':>5} {'SUP':>5} {'IH':>5} {'IH±':>6}"
+        sep = "-" * len(header)
+        lines = [header, sep]
+        for r in rows:
+            short_name = (r["name"][:13] + "…") if len(r["name"]) > 14 else r["name"]
+            mod_str = f"{r['ih_mod']:+d}" if r['ih_mod'] != 0 else "0"
+            lines.append(
+                f"{short_name:<14} "
+                f"{r['top']:>5} {r['jungle']:>5} {r['mid']:>5} "
+                f"{r['bot']:>5} {r['support']:>5} {r['inhouse']:>5} {mod_str:>6}"
+            )
+
+        # Discord message limit is 2000 chars. Split into chunks if needed.
+        # Each line is ~50 chars; ~35 players fit in one message.
+        chunks: list[str] = []
+        current_lines = [header, sep]
+        current_len = sum(len(s) + 1 for s in current_lines)
+        for line in lines[2:]:
+            if current_len + len(line) + 1 > 1900:
+                chunks.append("```\n" + "\n".join(current_lines) + "\n```")
+                current_lines = [header, sep, line]
+                current_len = sum(len(s) + 1 for s in current_lines)
+            else:
+                current_lines.append(line)
+                current_len += len(line) + 1
+        if current_lines:
+            chunks.append("```\n" + "\n".join(current_lines) + "\n```")
+
+        prefix = f"📊 Elos for {len(rows)} linked players (sorted by {sort_by}):\n"
+        await interaction.followup.send(prefix + chunks[0], ephemeral=True)
+        for chunk in chunks[1:]:
+            await interaction.followup.send(chunk, ephemeral=True)

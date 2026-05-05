@@ -19,6 +19,7 @@ from bot.services.elo import (
     DEFAULT_ELO,
     INHOUSE_ROLE,
     average_elo,
+    seed_from_historical_rank,
     seed_from_rank,
     update_elo,
 )
@@ -383,12 +384,25 @@ class AdminCog(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="sync-ranks", description="(admin) Refresh Riot API rank data for all linked players.")
+    @app_commands.command(name="sync-ranks", description="(admin) Refresh Riot rank for all linked players. Updates base_seed only; inhouse_modifier untouched.")
     async def sync_ranks(self, interaction: discord.Interaction):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("League Admin only.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
+        result = await self._refresh_all_base_seeds()
+        await interaction.followup.send(
+            f"✅ Synced {result['updated']} players · "
+            f"updated base_seed on {result['rows_updated']} rating rows · "
+            f"{result['errors']} errors",
+            ephemeral=True,
+        )
+
+    async def _refresh_all_base_seeds(self) -> dict:
+        """Refresh base_seed for every linked player from current Riot rank.
+        Used by both /sync-ranks (manual) and the Monday close job.
+        Returns counts dict for logging.
+        """
         async with get_session() as db:
             players = (await db.execute(
                 select(Player).where(
@@ -398,44 +412,84 @@ class AdminCog(commands.Cog):
             )).scalars().all()
             updated = 0
             errors = 0
-            reseeded = 0
+            rows_updated = 0
             for player in players:
                 try:
                     rank = await self.riot.get_solo_rank(player.riot_puuid)
+                    historical = None
+                    if rank is None:
+                        historical = await self.riot.get_historical_solo_rank(player.riot_puuid)
+
                     if rank:
                         player.solo_tier = rank.tier
                         player.solo_rank = rank.rank
                         player.solo_lp = rank.league_points
+                        new_seed = seed_from_rank(rank.tier, rank.rank)
+                    elif historical:
+                        new_seed = seed_from_historical_rank(historical.tier)
+                    else:
+                        new_seed = None  # no rank info; leave base_seed as-is
+
                     player.riot_last_synced = datetime.utcnow()
                     updated += 1
 
-                    # Re-seed elo for any role this player hasn't yet played in
-                    # an inhouse. Roles with games_played > 0 are NOT touched
-                    # because that would erase real ratings earned from wins/losses.
-                    if rank or player.solo_tier:
-                        seed_elo = seed_from_rank(player.solo_tier, player.solo_rank)
-                        for role in [*ROLES, INHOUSE_ROLE]:
-                            r = await db.get(Rating, (player.discord_id, role))
-                            if r is None:
-                                db.add(Rating(
-                                    discord_id=player.discord_id,
-                                    role=role,
-                                    elo=seed_elo,
-                                    games_played=0,
-                                ))
-                                reseeded += 1
-                            elif r.games_played == 0:
-                                r.elo = seed_elo
-                                reseeded += 1
+                    if new_seed is None:
+                        continue
+
+                    player.last_synced_seed_elo = new_seed
+                    for role in [*ROLES, INHOUSE_ROLE]:
+                        r = await db.get(Rating, (player.discord_id, role))
+                        if r is None:
+                            db.add(Rating(
+                                discord_id=player.discord_id,
+                                role=role,
+                                elo=new_seed,
+                                base_seed=new_seed,
+                                inhouse_modifier=0,
+                                games_played=0,
+                            ))
+                            rows_updated += 1
+                        else:
+                            r.base_seed = new_seed
+                            r.elo = r.base_seed + r.inhouse_modifier
+                            rows_updated += 1
                 except RiotAuthError:
-                    await interaction.followup.send("❌ Riot API key rejected. Stop and check key.", ephemeral=True)
-                    return
+                    raise
                 except Exception:
                     log.exception("Failed to sync %s", player.discord_id)
                     errors += 1
             await db.commit()
+        return {"updated": updated, "rows_updated": rows_updated, "errors": errors}
+
+    @app_commands.command(
+        name="reseed-all",
+        description="(admin) Refresh base_seed for everyone from current Riot rank. inhouse_modifier preserved.",
+    )
+    @app_commands.describe(confirm="Type 'yes' to confirm")
+    async def reseed_all(self, interaction: discord.Interaction, confirm: str = ""):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        if confirm.lower() != "yes":
+            await interaction.response.send_message(
+                "⚠️ This refreshes base_seed for every linked player from their current Riot rank. "
+                "inhouse_modifier (W/L from inhouse games) is preserved. "
+                "Run again with `confirm:yes` to proceed.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            result = await self._refresh_all_base_seeds()
+        except RiotAuthError:
+            await interaction.followup.send("❌ Riot API key rejected.", ephemeral=True)
+            return
         await interaction.followup.send(
-            f"✅ Synced {updated} players · re-seeded {reseeded} unplayed roles · {errors} errors",
+            f"✅ Reseed complete · "
+            f"refreshed base_seed for {result['updated']} players "
+            f"({result['rows_updated']} rating rows) · "
+            f"inhouse_modifier preserved · "
+            f"{result['errors']} errors",
             ephemeral=True,
         )
 
@@ -456,11 +510,19 @@ class AdminCog(commands.Cog):
             team1: dict[str, int] = {k: int(v) for k, v in json.loads(match.team1_json).items()}
             team2: dict[str, int] = {k: int(v) for k, v in json.loads(match.team2_json).items()}
 
-            # Helper: get-or-create a rating row, defaulting to DEFAULT_ELO
+            # Helper: get-or-create a rating row. New rows start at DEFAULT_ELO
+            # base_seed with 0 modifier (someone who's never linked but appears
+            # in a manual match — edge case).
             async def get_or_create_rating(pid: int, role: str) -> Rating:
                 r = await db.get(Rating, (pid, role))
                 if r is None:
-                    r = Rating(discord_id=pid, role=role, elo=DEFAULT_ELO, games_played=0)
+                    r = Rating(
+                        discord_id=pid, role=role,
+                        elo=DEFAULT_ELO,
+                        base_seed=DEFAULT_ELO,
+                        inhouse_modifier=0,
+                        games_played=0,
+                    )
                     db.add(r)
                 return r
 
@@ -477,7 +539,8 @@ class AdminCog(commands.Cog):
                 t2_overall[pid] = await get_or_create_rating(pid, INHOUSE_ROLE)
 
             # Compute opposing-team averages BEFORE applying any changes,
-            # so updates use pre-match values consistently.
+            # so updates use pre-match values consistently. Use displayed elo
+            # (base_seed + inhouse_modifier) for the matchup math.
             t1_role_avg = average_elo([r.elo for r in t1_role_ratings.values()])
             t2_role_avg = average_elo([r.elo for r in t2_role_ratings.values()])
             t1_overall_avg = average_elo([r.elo for r in t1_overall.values()])
@@ -485,37 +548,41 @@ class AdminCog(commands.Cog):
 
             team1_won = (winner == 1)
 
-            # Update ratings: each player's role rating moves based on opposing
-            # team's role-rating average; overall rating moves based on opposing
-            # team's overall-rating average.
+            # Update ratings: chess-elo delta is added to inhouse_modifier
+            # (NOT base_seed). Then `elo` is recomputed = base_seed + modifier.
+            # base_seed is rank-derived and only changed by sync.
             for role, role_rating in t1_role_ratings.items():
                 pid = team1[role]
-                new_role_elo, _ = update_elo(
+                _, role_delta = update_elo(
                     role_rating.elo, t2_role_avg, won=team1_won, games_played=role_rating.games_played
                 )
-                role_rating.elo = new_role_elo
+                role_rating.inhouse_modifier += role_delta
+                role_rating.elo = role_rating.base_seed + role_rating.inhouse_modifier
                 role_rating.games_played += 1
 
                 overall = t1_overall[pid]
-                new_overall_elo, _ = update_elo(
+                _, overall_delta = update_elo(
                     overall.elo, t2_overall_avg, won=team1_won, games_played=overall.games_played
                 )
-                overall.elo = new_overall_elo
+                overall.inhouse_modifier += overall_delta
+                overall.elo = overall.base_seed + overall.inhouse_modifier
                 overall.games_played += 1
 
             for role, role_rating in t2_role_ratings.items():
                 pid = team2[role]
-                new_role_elo, _ = update_elo(
+                _, role_delta = update_elo(
                     role_rating.elo, t1_role_avg, won=not team1_won, games_played=role_rating.games_played
                 )
-                role_rating.elo = new_role_elo
+                role_rating.inhouse_modifier += role_delta
+                role_rating.elo = role_rating.base_seed + role_rating.inhouse_modifier
                 role_rating.games_played += 1
 
                 overall = t2_overall[pid]
-                new_overall_elo, _ = update_elo(
+                _, overall_delta = update_elo(
                     overall.elo, t1_overall_avg, won=not team1_won, games_played=overall.games_played
                 )
-                overall.elo = new_overall_elo
+                overall.inhouse_modifier += overall_delta
+                overall.elo = overall.base_seed + overall.inhouse_modifier
                 overall.games_played += 1
 
             # Write per-player performance rows. KDA from OCR if available.
@@ -669,10 +736,13 @@ class AdminCog(commands.Cog):
                 for role in [*ROLES, INHOUSE_ROLE]:
                     rating = await db.get(Rating, (fake_id, role))
                     if rating is None:
+                        seed_with_jitter = seed_elo + jitter
                         db.add(Rating(
                             discord_id=fake_id,
                             role=role,
-                            elo=seed_elo + jitter,
+                            elo=seed_with_jitter,
+                            base_seed=seed_with_jitter,
+                            inhouse_modifier=0,
                             games_played=0,
                         ))
 

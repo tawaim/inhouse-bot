@@ -35,6 +35,13 @@ class Player(Base):
     solo_lp: Mapped[Optional[int]] = mapped_column(Integer)
     primary_role: Mapped[Optional[str]] = mapped_column(String(8))
     riot_last_synced: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    last_synced_seed_elo: Mapped[Optional[int]] = mapped_column(Integer)
+    # The seed elo computed from the player's rank at last sync. Used to apply
+    # a delta to inhouse elo when the player ranks up/down in solo queue
+    # between syncs.
+    previous_riot_puuid: Mapped[Optional[str]] = mapped_column(String(128))
+    # Tracks the last-known PUUID across unlinks. Used to detect when a re-link
+    # is a different account (-> reseed elo) vs the same one (-> keep elo).
     link_status: Mapped[str] = mapped_column(String(16), default="approved")
     # "pending" | "approved" — set by /link approval flow
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -43,7 +50,22 @@ class Player(Base):
 
 
 class Rating(Base):
-    """One row per (player, role). Chess-style Elo rating.
+    """One row per (player, role). Chess-style Elo split into two pieces.
+
+    - base_seed:        derived from solo queue rank, refreshed weekly (Monday
+                        close job) and on-demand via /sync-ranks. Updates
+                        whenever the player's Riot rank changes. Reset by
+                        /reseed-all. This is the "what does the matchmaker
+                        think you're worth based on your solo queue?" number.
+    - inhouse_modifier: cumulative +/- from inhouse W/L since the player
+                        linked. Starts at 0, updates by chess-elo delta after
+                        each match. Persists across rank changes and across
+                        re-links. NEVER reset by /reseed-all (only by an
+                        explicit hard wipe).
+
+    Displayed elo is base_seed + inhouse_modifier and is recomputed whenever
+    either piece changes.
+
     Roles include the 5 standard plus "INHOUSE" — a sixth row tracking the
     player's cumulative elo across all roles played.
     """
@@ -52,6 +74,8 @@ class Rating(Base):
     discord_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("players.discord_id"), primary_key=True)
     role: Mapped[str] = mapped_column(String(8), primary_key=True)
     elo: Mapped[int] = mapped_column(Integer, default=1200)
+    base_seed: Mapped[int] = mapped_column(Integer, default=1200)
+    inhouse_modifier: Mapped[int] = mapped_column(Integer, default=0)
     games_played: Mapped[int] = mapped_column(Integer, default=0)
 
     player: Mapped[Player] = relationship(back_populates="ratings")

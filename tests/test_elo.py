@@ -24,6 +24,27 @@ def test_division_bonus_within_tier():
     assert seed_from_rank("GOLD", "I") > seed_from_rank("GOLD", "IV")
 
 
+def test_linear_ladder_no_gaps():
+    """Plat I + 50 == Emerald IV. Across the entire ladder, divisions are 50 apart
+    and tiers are 200 apart, so the seed values form a smooth line."""
+    assert seed_from_rank("PLATINUM", "IV") == 1600
+    assert seed_from_rank("PLATINUM", "III") == 1650
+    assert seed_from_rank("PLATINUM", "II") == 1700
+    assert seed_from_rank("PLATINUM", "I") == 1750
+    assert seed_from_rank("EMERALD", "IV") == 1800
+    # Plat I + 50 == Emerald IV (no gap)
+    assert seed_from_rank("EMERALD", "IV") - seed_from_rank("PLATINUM", "I") == 50
+
+
+def test_apex_tiers_have_no_division_bonus():
+    """Master/GM/Challenger don't have divisions. Should return the flat tier seed
+    regardless of what division is passed in. Apex tiers are 100 elo apart."""
+    assert seed_from_rank("MASTER", "I") == seed_from_rank("MASTER", "IV")
+    assert seed_from_rank("MASTER", "I") == 2200
+    assert seed_from_rank("GRANDMASTER", "II") == 2300
+    assert seed_from_rank("CHALLENGER", "I") == 2500
+
+
 def test_case_insensitive():
     assert seed_from_rank("PLATINUM", "II") == seed_from_rank("platinum", "ii")
 
@@ -88,3 +109,31 @@ def test_full_matchup_team_avg_diff():
     _, delta = update_elo(1700, 1300, won=True, games_played=20)
     # Expected score against 1300 is ~0.91; only 9% of K=20 = ~2 elo
     assert 1 <= delta <= 3
+
+
+def test_historical_rank_applies_rust_penalty():
+    """Last-season rank should seed -200 elo from current-rank-IV equivalent."""
+    from bot.services.elo import seed_from_historical_rank, RUST_PENALTY
+    # Emerald IV current = 1800. Emerald historical = 1800 - 200 = 1600 (= Plat IV)
+    assert seed_from_historical_rank("EMERALD") == seed_from_rank("PLATINUM", "IV")
+    # Diamond historical = 2000 - 200 = 1800 (= Emerald IV)
+    assert seed_from_historical_rank("DIAMOND") == seed_from_rank("EMERALD", "IV")
+    # The penalty is exactly 200
+    assert seed_from_historical_rank("EMERALD") == 1800 - RUST_PENALTY
+
+
+def test_historical_rank_iron_floors_at_iron():
+    """Iron has no lower seed; should stay at IRON's value (800)."""
+    from bot.services.elo import seed_from_historical_rank, TIER_SEED
+    assert seed_from_historical_rank("IRON") == TIER_SEED["IRON"]
+
+
+def test_historical_rank_unranked_returns_default():
+    from bot.services.elo import seed_from_historical_rank
+    assert seed_from_historical_rank(None) == DEFAULT_ELO
+    assert seed_from_historical_rank("MYTHIC") == DEFAULT_ELO
+
+
+def test_historical_rank_case_insensitive():
+    from bot.services.elo import seed_from_historical_rank
+    assert seed_from_historical_rank("DIAMOND") == seed_from_historical_rank("diamond")
