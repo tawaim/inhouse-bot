@@ -627,55 +627,6 @@ class LinkingCog(commands.Cog):
 
         await interaction.response.send_message(embed=embed)
 
-
-def _aggregate_stats(perfs: list, all_roles: bool = False) -> dict | dict[str, dict]:
-    """Aggregate match performances into per-role stats dicts.
-    If all_roles=True, returns a single dict aggregating across all roles.
-    Otherwise returns dict[role, dict].
-    """
-    if all_roles:
-        bucket = {"games": 0, "wins": 0, "losses": 0, "k": 0, "d": 0, "a": 0}
-        for p in perfs:
-            bucket["games"] += 1
-            if p.won:
-                bucket["wins"] += 1
-            else:
-                bucket["losses"] += 1
-            bucket["k"] += p.kills or 0
-            bucket["d"] += p.deaths or 0
-            bucket["a"] += p.assists or 0
-        return bucket
-
-    by_role: dict[str, dict] = {}
-    for p in perfs:
-        b = by_role.setdefault(p.role, {"games": 0, "wins": 0, "losses": 0, "k": 0, "d": 0, "a": 0})
-        b["games"] += 1
-        if p.won:
-            b["wins"] += 1
-        else:
-            b["losses"] += 1
-        b["k"] += p.kills or 0
-        b["d"] += p.deaths or 0
-        b["a"] += p.assists or 0
-    return by_role
-
-
-def _format_stat_line(stats: dict) -> str:
-    """Render a stats dict as a one-line string. Handles missing KDA gracefully."""
-    games = stats["games"]
-    if games == 0:
-        return "no games"
-    wins, losses = stats["wins"], stats["losses"]
-    wr = (wins / games * 100) if games else 0
-    line = f"{games} games · {wins}W-{losses}L ({wr:.0f}%)"
-    if stats["k"] or stats["d"] or stats["a"]:
-        avg_k = stats["k"] / games
-        avg_d = stats["d"] / games
-        avg_a = stats["a"] / games
-        kda = (avg_k + avg_a) / max(avg_d, 1.0)
-        line += f" · {avg_k:.1f}/{avg_d:.1f}/{avg_a:.1f} ({kda:.1f} KDA)"
-    return line
-
     @app_commands.command(
         name="admin-list-players",
         description="(admin) Show all linked players with their rank and inhouse elo.",
@@ -873,3 +824,53 @@ def _format_stat_line(stats: dict) -> str:
         await interaction.followup.send(prefix + chunks[0], ephemeral=True)
         for chunk in chunks[1:]:
             await interaction.followup.send(chunk, ephemeral=True)
+
+
+
+def _aggregate_stats(perfs: list, all_roles: bool = False) -> dict | dict[str, dict]:
+    """Aggregate match performances into per-role stats dicts.
+    If all_roles=True, returns a single dict aggregating across all roles.
+    Otherwise returns dict[role, dict].
+    """
+    if all_roles:
+        bucket = {"games": 0, "wins": 0, "losses": 0, "k": 0, "d": 0, "a": 0}
+        for p in perfs:
+            bucket["games"] += 1
+            if p.won:
+                bucket["wins"] += 1
+            else:
+                bucket["losses"] += 1
+            bucket["k"] += p.kills or 0
+            bucket["d"] += p.deaths or 0
+            bucket["a"] += p.assists or 0
+        return bucket
+
+    by_role: dict[str, dict] = {}
+    for p in perfs:
+        b = by_role.setdefault(p.role, {"games": 0, "wins": 0, "losses": 0, "k": 0, "d": 0, "a": 0})
+        b["games"] += 1
+        if p.won:
+            b["wins"] += 1
+        else:
+            b["losses"] += 1
+        b["k"] += p.kills or 0
+        b["d"] += p.deaths or 0
+        b["a"] += p.assists or 0
+    return by_role
+
+
+def _format_stat_line(stats: dict) -> str:
+    """Render a stats dict as a one-line string. Handles missing KDA gracefully."""
+    games = stats["games"]
+    if games == 0:
+        return "no games"
+    wins, losses = stats["wins"], stats["losses"]
+    wr = (wins / games * 100) if games else 0
+    line = f"{games} games · {wins}W-{losses}L ({wr:.0f}%)"
+    if stats["k"] or stats["d"] or stats["a"]:
+        avg_k = stats["k"] / games
+        avg_d = stats["d"] / games
+        avg_a = stats["a"] / games
+        kda = (avg_k + avg_a) / max(avg_d, 1.0)
+        line += f" · {avg_k:.1f}/{avg_d:.1f}/{avg_a:.1f} ({kda:.1f} KDA)"
+    return line
