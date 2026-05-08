@@ -19,9 +19,11 @@ from bot.services.elo import (
     DEFAULT_ELO,
     INHOUSE_ROLE,
     average_elo,
+    parse_series_score,
     seed_from_historical_rank,
     seed_from_rank,
     update_elo,
+    update_elo_series,
 )
 from bot.services.ocr import parse_screenshot
 from bot.services.riot_client import RiotAuthError, RiotClient
@@ -235,6 +237,114 @@ class ManualMatchModal(discord.ui.Modal, title="Manual Match Entry"):
         )
 
 
+class PickupSeriesModal(discord.ui.Modal, title="Pickup Series Result"):
+    """Standalone series report — no recruitment session needed.
+    Admin pastes 2 rosters + series score, bot creates a Match row with
+    session_id=NULL, runs elo updates, posts confirmation.
+    """
+    roster = discord.ui.TextInput(
+        label="Team rosters",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=2000,
+        placeholder=(
+            "TEAM 1\n"
+            "TOP: @user1\n"
+            "JUNGLE: @user2\n"
+            "MID: @user3\n"
+            "BOT: @user4\n"
+            "SUPPORT: @user5\n"
+            "TEAM 2\n"
+            "TOP: @user6\n..."
+        ),
+    )
+    series_score = discord.ui.TextInput(
+        label="Series score (e.g. 2-0, 2-1)",
+        style=discord.TextStyle.short,
+        required=True,
+        max_length=8,
+        placeholder="2-1",
+    )
+
+    def __init__(self, commit_callback):
+        super().__init__()
+        self._commit = commit_callback
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        # Parse series score first
+        team1_wins, team2_wins = parse_series_score(self.series_score.value)
+        if team1_wins < 0:
+            await interaction.followup.send(
+                f'❌ Invalid series score "{self.series_score.value}". Use "2-0", "2-1", "1-2", "0-2".',
+                ephemeral=True,
+            )
+            return
+
+        # Parse roster
+        try:
+            team1, team2 = parse_manual_match(self.roster.value)
+        except ManualMatchParseError as e:
+            await interaction.followup.send(f"❌ Parse error: {e}", ephemeral=True)
+            return
+
+        all_ids = list(team1.values()) + list(team2.values())
+
+        async with get_session() as db:
+            # Verify everyone is linked
+            unlinked = []
+            for pid in all_ids:
+                player = await db.get(Player, pid)
+                if player is None or not player.riot_puuid or player.link_status != "approved":
+                    unlinked.append(pid)
+            if unlinked:
+                mentions = " ".join(f"<@{i}>" for i in unlinked)
+                await interaction.followup.send(
+                    f"❌ Not linked / not approved: {mentions}",
+                    ephemeral=True,
+                )
+                return
+
+            # Create a session-less Match row
+            match = Match(
+                session_id=None,
+                team1_json=json.dumps(team1),
+                team2_json=json.dumps(team2),
+                predicted_balance=None,
+            )
+            db.add(match)
+            await db.commit()
+            await db.refresh(match)
+            match_id = match.id
+
+        # Apply elo updates via the cog's commit helper
+        await self._commit(match_id, team1_wins, team2_wins, None, interaction.user.id, None)
+
+        # Post confirmation in the channel
+        winner_label = "Team 1" if team1_wins > team2_wins else "Team 2"
+        from bot.config import ROLE_EMOJIS
+        embed = discord.Embed(
+            title=f"🎮 Pickup Series Result: {team1_wins}-{team2_wins}",
+            description=f"**{winner_label} wins.** Elo updated for all 10 players.",
+            color=discord.Color.green(),
+        )
+        t1 = "\n".join(f"{ROLE_EMOJIS[r]} **{r}**: <@{team1[r]}>" for r in ROLES)
+        t2 = "\n".join(f"{ROLE_EMOJIS[r]} **{r}**: <@{team2[r]}>" for r in ROLES)
+        embed.add_field(name="🔵 Team 1 (Blue)", value=t1, inline=True)
+        embed.add_field(name="🔴 Team 2 (Red)", value=t2, inline=True)
+        embed.set_footer(text=f"Match {match_id} · Pickup by {interaction.user.display_name}")
+
+        # Post publicly in the same channel where the command was run
+        if interaction.channel:
+            await interaction.channel.send(embed=embed)
+
+        await interaction.followup.send(
+            f"✅ Pickup series recorded as match {match_id}.",
+            ephemeral=True,
+        )
+
+
 class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot, config: Config, riot: RiotClient):
         self.bot = bot
@@ -274,22 +384,30 @@ class AdminCog(commands.Cog):
             f"✅ {purpose} channel set to {channel.mention}", ephemeral=True
         )
 
-    @app_commands.command(name="report", description="(admin) Report game outcome with screenshot.")
+    @app_commands.command(name="report", description="(admin) Report best-of-3 series outcome with screenshot.")
     @app_commands.describe(
         match_id="The match ID from the teams post",
-        winner="Which team won",
+        series_score='Series score from team1 perspective: "2-0", "2-1", "1-2", or "0-2"',
         screenshot="End-of-game screenshot",
     )
     async def report(
         self,
         interaction: discord.Interaction,
         match_id: int,
-        winner: Literal["team1", "team2"],
+        series_score: str,
         screenshot: discord.Attachment,
     ):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("League Admin only.", ephemeral=True)
             return
+        team1_wins, team2_wins = parse_series_score(series_score)
+        if team1_wins < 0:
+            await interaction.response.send_message(
+                'Invalid series score. Use "2-0", "2-1", "1-2", or "0-2".',
+                ephemeral=True,
+            )
+            return
+
         await interaction.response.defer()
 
         async with get_session() as db:
@@ -299,8 +417,7 @@ class AdminCog(commands.Cog):
                 return
             if match.winner is not None:
                 await interaction.followup.send(
-                    f"Match {match_id} already reported (winner: team{match.winner}). "
-                    f"Use /unreport first if this is a correction.",
+                    f"Match {match_id} already reported. Use /unreport first if this is a correction.",
                     ephemeral=True,
                 )
                 return
@@ -310,10 +427,11 @@ class AdminCog(commands.Cog):
         parsed = parse_screenshot(image_bytes)
 
         # Show admin a confirmation embed before committing
+        winner_label = "team1" if team1_wins > team2_wins else "team2"
         embed = discord.Embed(
             title=f"Confirm Match {match_id} Report",
             color=discord.Color.orange(),
-            description=f"**Winner:** {winner}\n**Screenshot:** {screenshot.filename}",
+            description=f"**Series:** {team1_wins}-{team2_wins} ({winner_label} wins)\n**Screenshot:** {screenshot.filename}",
         )
         if parsed.notes:
             embed.add_field(name="OCR Notes", value="\n".join(parsed.notes), inline=False)
@@ -347,29 +465,37 @@ class AdminCog(commands.Cog):
             return
 
         # Commit: update match, write performances, run elo update
-        winner_int = 1 if winner == "team1" else 2
-        await self._commit_result(match_id, winner_int, screenshot.url, interaction.user.id, parsed)
+        await self._commit_result(match_id, team1_wins, team2_wins, screenshot.url, interaction.user.id, parsed)
         await confirm_msg.edit(
-            content=f"✅ Match {match_id} recorded. Team {winner_int} wins. Elo updated.",
+            content=f"✅ Match {match_id} recorded. Series {team1_wins}-{team2_wins} ({winner_label} wins). Elo updated.",
             embed=None,
         )
 
-    @app_commands.command(name="report-manual", description="(admin) Report game outcome without a screenshot.")
+    @app_commands.command(name="report-manual", description="(admin) Report best-of-3 series outcome without a screenshot.")
     @app_commands.describe(
-        winner="Which team won",
+        series_score='Series score from team1 perspective: "2-0", "2-1", "1-2", or "0-2"',
         match_id="The match ID from the teams post (or use game_date instead)",
         game_date="Game date YYYY-MM-DD (must be a Thursday) — alternative to match_id",
     )
     async def report_manual(
         self,
         interaction: discord.Interaction,
-        winner: Literal["team1", "team2"],
+        series_score: str,
         match_id: Optional[int] = None,
         game_date: Optional[str] = None,
     ):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("League Admin only.", ephemeral=True)
             return
+
+        team1_wins, team2_wins = parse_series_score(series_score)
+        if team1_wins < 0:
+            await interaction.response.send_message(
+                'Invalid series score. Use "2-0", "2-1", "1-2", or "0-2" (team1-team2).',
+                ephemeral=True,
+            )
+            return
+
         if match_id is None and game_date is None:
             await interaction.response.send_message(
                 "Provide either `match_id:` or `game_date:` (one of them).",
@@ -391,7 +517,6 @@ class AdminCog(commands.Cog):
                     await interaction.followup.send(f"Match {match_id} not found.", ephemeral=True)
                     return
             else:
-                # Resolve match by game_date — find session, then its most recent unreported match
                 try:
                     target_date = datetime.strptime(game_date, "%Y-%m-%d").date()
                 except ValueError:
@@ -407,10 +532,7 @@ class AdminCog(commands.Cog):
                     select(InhouseSession).where(InhouseSession.game_date == target_date)
                 )).scalars().first()
                 if session is None:
-                    await interaction.followup.send(
-                        f"No session for {game_date}.",
-                        ephemeral=True,
-                    )
+                    await interaction.followup.send(f"No session for {game_date}.", ephemeral=True)
                     return
                 match = (await db.execute(
                     select(Match)
@@ -429,10 +551,10 @@ class AdminCog(commands.Cog):
                 await interaction.followup.send(f"Match {match_id} already reported.", ephemeral=True)
                 return
 
-        winner_int = 1 if winner == "team1" else 2
-        await self._commit_result(match_id, winner_int, None, interaction.user.id, None)
+        await self._commit_result(match_id, team1_wins, team2_wins, None, interaction.user.id, None)
+        winner_team = "team1" if team1_wins > team2_wins else "team2"
         await interaction.followup.send(
-            f"✅ Match {match_id} recorded. Team {winner_int} wins. Elo updated.",
+            f"✅ Match {match_id} recorded. Series {team1_wins}-{team2_wins} ({winner_team} wins). Elo updated.",
             ephemeral=True,
         )
 
@@ -550,7 +672,8 @@ class AdminCog(commands.Cog):
     async def _commit_result(
         self,
         match_id: int,
-        winner: int,  # 1 or 2
+        team1_wins: int,
+        team2_wins: int,
         screenshot_url: str | None,
         admin_id: int,
         parsed,
@@ -598,23 +721,30 @@ class AdminCog(commands.Cog):
             t1_overall_avg = average_elo([r.elo for r in t1_overall.values()])
             t2_overall_avg = average_elo([r.elo for r in t2_overall.values()])
 
-            team1_won = (winner == 1)
+            team1_won = team1_wins > team2_wins  # for the perf-row 'won' field
 
             # Update ratings: chess-elo delta is added to inhouse_modifier
             # (NOT base_seed). Then `elo` is recomputed = base_seed + modifier.
             # base_seed is rank-derived and only changed by sync.
+            #
+            # Series scoring: 2-0 = 1.0 actual, 2-1 = 0.667 actual, etc.
+            # Each player gets ONE elo update for the entire series.
             for role, role_rating in t1_role_ratings.items():
                 pid = team1[role]
-                _, role_delta = update_elo(
-                    role_rating.elo, t2_role_avg, won=team1_won, games_played=role_rating.games_played
+                _, role_delta = update_elo_series(
+                    role_rating.elo, t2_role_avg,
+                    player_team_wins=team1_wins, opponent_team_wins=team2_wins,
+                    games_played=role_rating.games_played,
                 )
                 role_rating.inhouse_modifier += role_delta
                 role_rating.elo = role_rating.base_seed + role_rating.inhouse_modifier
                 role_rating.games_played += 1
 
                 overall = t1_overall[pid]
-                _, overall_delta = update_elo(
-                    overall.elo, t2_overall_avg, won=team1_won, games_played=overall.games_played
+                _, overall_delta = update_elo_series(
+                    overall.elo, t2_overall_avg,
+                    player_team_wins=team1_wins, opponent_team_wins=team2_wins,
+                    games_played=overall.games_played,
                 )
                 overall.inhouse_modifier += overall_delta
                 overall.elo = overall.base_seed + overall.inhouse_modifier
@@ -622,16 +752,20 @@ class AdminCog(commands.Cog):
 
             for role, role_rating in t2_role_ratings.items():
                 pid = team2[role]
-                _, role_delta = update_elo(
-                    role_rating.elo, t1_role_avg, won=not team1_won, games_played=role_rating.games_played
+                _, role_delta = update_elo_series(
+                    role_rating.elo, t1_role_avg,
+                    player_team_wins=team2_wins, opponent_team_wins=team1_wins,
+                    games_played=role_rating.games_played,
                 )
                 role_rating.inhouse_modifier += role_delta
                 role_rating.elo = role_rating.base_seed + role_rating.inhouse_modifier
                 role_rating.games_played += 1
 
                 overall = t2_overall[pid]
-                _, overall_delta = update_elo(
-                    overall.elo, t1_overall_avg, won=not team1_won, games_played=overall.games_played
+                _, overall_delta = update_elo_series(
+                    overall.elo, t1_overall_avg,
+                    player_team_wins=team2_wins, opponent_team_wins=team1_wins,
+                    games_played=overall.games_played,
                 )
                 overall.inhouse_modifier += overall_delta
                 overall.elo = overall.base_seed + overall.inhouse_modifier
@@ -667,14 +801,19 @@ class AdminCog(commands.Cog):
                     kills=k, deaths=d, assists=a, won=not team1_won,
                 ))
 
-            match.winner = winner
+            match.winner = 1 if team1_wins > team2_wins else 2
+            match.team1_wins = team1_wins
+            match.team2_wins = team2_wins
             match.reported_by = admin_id
             match.reported_at = datetime.utcnow()
             match.screenshot_url = screenshot_url
 
-            session = await db.get(InhouseSession, match.session_id)
-            if session and session.status == "matched":
-                session.status = "completed"
+            # If this match was tied to a session, mark the session completed.
+            # Pickup matches have no session, so skip this step.
+            if match.session_id is not None:
+                session = await db.get(InhouseSession, match.session_id)
+                if session and session.status == "matched":
+                    session.status = "completed"
 
             await db.commit()
 
@@ -915,3 +1054,15 @@ class AdminCog(commands.Cog):
                     return
 
         await interaction.response.send_modal(ManualMatchModal(session.id))
+
+    @app_commands.command(
+        name="pickup-series",
+        description="(admin) Report a pickup series — no recruitment session needed.",
+    )
+    async def pickup_series(self, interaction: discord.Interaction):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        await interaction.response.send_modal(
+            PickupSeriesModal(commit_callback=self._commit_result)
+        )

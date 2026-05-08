@@ -118,20 +118,28 @@ class Signup(Base):
 
 
 class Match(Base):
-    """A single 5v5 game generated from a session's signups."""
+    """A 5v5 best-of-3 series.
+
+    session_id is nullable so pickup games (not tied to a recruitment) can exist.
+    Series score is stored as team1_wins/team2_wins (e.g., 2-0, 2-1).
+    The legacy `winner` column is still set (1 or 2) for compatibility with
+    queries that check has-it-been-reported, but the elo math uses the score.
+    """
     __tablename__ = "matches"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    session_id: Mapped[int] = mapped_column(Integer, ForeignKey("sessions.id"))
+    session_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("sessions.id"), nullable=True)
     team1_json: Mapped[str] = mapped_column(Text)  # {"TOP": discord_id, ...}
     team2_json: Mapped[str] = mapped_column(Text)
     predicted_balance: Mapped[Optional[float]] = mapped_column(Float)
     winner: Mapped[Optional[int]] = mapped_column(Integer)  # 1, 2, or NULL
+    team1_wins: Mapped[int] = mapped_column(Integer, default=0)
+    team2_wins: Mapped[int] = mapped_column(Integer, default=0)
     reported_by: Mapped[Optional[int]] = mapped_column(BigInteger)
     reported_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     screenshot_url: Mapped[Optional[str]] = mapped_column(Text)
 
-    session: Mapped[Session] = relationship(back_populates="matches")
+    session: Mapped[Optional[Session]] = relationship(back_populates="matches")
     performances: Mapped[list["MatchPerformance"]] = relationship(
         back_populates="match", cascade="all, delete-orphan"
     )

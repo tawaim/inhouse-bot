@@ -137,3 +137,54 @@ def test_historical_rank_unranked_returns_default():
 def test_historical_rank_case_insensitive():
     from bot.services.elo import seed_from_historical_rank
     assert seed_from_historical_rank("DIAMOND") == seed_from_historical_rank("diamond")
+
+
+def test_parse_series_score_valid():
+    from bot.services.elo import parse_series_score
+    assert parse_series_score("2-0") == (2, 0)
+    assert parse_series_score("2-1") == (2, 1)
+    assert parse_series_score("1-2") == (1, 2)
+    assert parse_series_score("0-2") == (0, 2)
+    assert parse_series_score("3-2") == (3, 2)  # bo5
+    assert parse_series_score("2:1") == (2, 1)  # alternate sep
+    assert parse_series_score(" 2-1 ") == (2, 1)  # whitespace
+
+
+def test_parse_series_score_invalid():
+    from bot.services.elo import parse_series_score
+    assert parse_series_score("") == (-1, -1)
+    assert parse_series_score("foo") == (-1, -1)
+    assert parse_series_score("2") == (-1, -1)
+    assert parse_series_score("2-2") == (-1, -1)  # ties not allowed
+    assert parse_series_score("-1-0") == (-1, -1)
+    assert parse_series_score("99-0") == (-1, -1)  # too long
+
+
+def test_series_2_0_gains_more_than_2_1():
+    """A 2-0 sweep should award more elo than a 2-1 win."""
+    from bot.services.elo import update_elo_series
+    _, sweep_delta = update_elo_series(1500, 1500, 2, 0, games_played=20)
+    _, narrow_delta = update_elo_series(1500, 1500, 2, 1, games_played=20)
+    assert sweep_delta > narrow_delta > 0
+
+
+def test_series_loss_costs_appropriately():
+    """Losing 0-2 costs more than losing 1-2."""
+    from bot.services.elo import update_elo_series
+    _, swept_delta = update_elo_series(1500, 1500, 0, 2, games_played=20)
+    _, narrow_loss = update_elo_series(1500, 1500, 1, 2, games_played=20)
+    assert swept_delta < narrow_loss < 0
+
+
+def test_series_2_0_equal_peers():
+    """vs equal opponent, expected = 0.5, actual 1.0, K=20 -> +10 elo."""
+    from bot.services.elo import update_elo_series
+    _, delta = update_elo_series(1500, 1500, 2, 0, games_played=20)
+    assert delta == 10
+
+
+def test_series_2_1_equal_peers():
+    """vs equal opponent, expected = 0.5, actual 0.667, K=20 -> +3 elo."""
+    from bot.services.elo import update_elo_series
+    _, delta = update_elo_series(1500, 1500, 2, 1, games_played=20)
+    assert delta == 3

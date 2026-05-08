@@ -121,6 +121,52 @@ def update_elo(
     return player_elo + delta, delta
 
 
+def update_elo_series(
+    player_elo: int,
+    opponent_elo: int,
+    player_team_wins: int,
+    opponent_team_wins: int,
+    games_played: int,
+) -> tuple[int, int]:
+    """Compute one player's new elo after a SERIES.
+
+    Score is wins / total_games (e.g., 2-0 = 1.0, 2-1 = 0.667, 1-2 = 0.333,
+    0-2 = 0.0). Standard chess elo update against expected score, scaled by
+    the player's K factor. K is NOT multiplied by series length — a series
+    is treated as one rating event regardless of whether it went 2-0 or 2-1.
+
+    Returns (new_elo, delta) where delta is the signed change.
+    """
+    total = player_team_wins + opponent_team_wins
+    if total == 0:
+        return player_elo, 0  # no games played, no update
+    expected = expected_score(player_elo, opponent_elo)
+    actual = player_team_wins / total
+    k = k_factor(games_played)
+    delta = round(k * (actual - expected))
+    return player_elo + delta, delta
+
+
+def parse_series_score(score: str) -> tuple[int, int]:
+    """Parse '2-0', '2-1', '1-2', '0-2' (or '2:0' etc.) into (team1_wins, team2_wins).
+    Returns (-1, -1) on invalid input.
+    """
+    cleaned = score.strip().replace(":", "-").replace(" ", "")
+    parts = cleaned.split("-")
+    if len(parts) != 2:
+        return (-1, -1)
+    try:
+        a, b = int(parts[0]), int(parts[1])
+    except ValueError:
+        return (-1, -1)
+    # Allow any best-of-N up to 5; reject negatives and ties
+    if a < 0 or b < 0 or a == b:
+        return (-1, -1)
+    if max(a, b) > 5:
+        return (-1, -1)
+    return (a, b)
+
+
 def average_elo(elos: list[int]) -> int:
     if not elos:
         return DEFAULT_ELO
