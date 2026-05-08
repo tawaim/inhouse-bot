@@ -356,27 +356,79 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(name="report-manual", description="(admin) Report game outcome without a screenshot.")
     @app_commands.describe(
-        match_id="The match ID from the teams post",
         winner="Which team won",
+        match_id="The match ID from the teams post (or use game_date instead)",
+        game_date="Game date YYYY-MM-DD (must be a Thursday) — alternative to match_id",
     )
     async def report_manual(
         self,
         interaction: discord.Interaction,
-        match_id: int,
         winner: Literal["team1", "team2"],
+        match_id: Optional[int] = None,
+        game_date: Optional[str] = None,
     ):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("League Admin only.", ephemeral=True)
             return
+        if match_id is None and game_date is None:
+            await interaction.response.send_message(
+                "Provide either `match_id:` or `game_date:` (one of them).",
+                ephemeral=True,
+            )
+            return
+        if match_id is not None and game_date is not None:
+            await interaction.response.send_message(
+                "Provide only one of `match_id:` or `game_date:`, not both.",
+                ephemeral=True,
+            )
+            return
+
         await interaction.response.defer(ephemeral=True)
         async with get_session() as db:
-            match = await db.get(Match, match_id)
-            if match is None:
-                await interaction.followup.send(f"Match {match_id} not found.", ephemeral=True)
-                return
+            if match_id is not None:
+                match = await db.get(Match, match_id)
+                if match is None:
+                    await interaction.followup.send(f"Match {match_id} not found.", ephemeral=True)
+                    return
+            else:
+                # Resolve match by game_date — find session, then its most recent unreported match
+                try:
+                    target_date = datetime.strptime(game_date, "%Y-%m-%d").date()
+                except ValueError:
+                    await interaction.followup.send(
+                        "Date must be YYYY-MM-DD format (e.g. `2026-05-14`).",
+                        ephemeral=True,
+                    )
+                    return
+                if target_date.weekday() != 3:
+                    await interaction.followup.send("Date must be a Thursday.", ephemeral=True)
+                    return
+                session = (await db.execute(
+                    select(InhouseSession).where(InhouseSession.game_date == target_date)
+                )).scalars().first()
+                if session is None:
+                    await interaction.followup.send(
+                        f"No session for {game_date}.",
+                        ephemeral=True,
+                    )
+                    return
+                match = (await db.execute(
+                    select(Match)
+                    .where(Match.session_id == session.id, Match.winner.is_(None))
+                    .order_by(Match.id.desc())
+                )).scalars().first()
+                if match is None:
+                    await interaction.followup.send(
+                        f"No unreported match for {game_date}.",
+                        ephemeral=True,
+                    )
+                    return
+                match_id = match.id
+
             if match.winner is not None:
                 await interaction.followup.send(f"Match {match_id} already reported.", ephemeral=True)
                 return
+
         winner_int = 1 if winner == "team1" else 2
         await self._commit_result(match_id, winner_int, None, interaction.user.id, None)
         await interaction.followup.send(
@@ -810,24 +862,56 @@ class AdminCog(commands.Cog):
         name="manual-match",
         description="(admin) Override the matchmaker — paste in a roster you made yourself.",
     )
-    async def manual_match(self, interaction: discord.Interaction):
+    @app_commands.describe(
+        game_date="Game date YYYY-MM-DD (must be a Thursday). If omitted, uses the soonest active session."
+    )
+    async def manual_match(
+        self,
+        interaction: discord.Interaction,
+        game_date: Optional[str] = None,
+    ):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("League Admin only.", ephemeral=True)
             return
 
-        # Find the active session — either still recruiting, or already matched
-        # (admin can override even after auto-matchmaker ran)
         async with get_session() as db:
-            session = (await db.execute(
-                select(InhouseSession)
-                .where(InhouseSession.status.in_(["recruiting", "matched"]))
-                .order_by(InhouseSession.game_date.asc())
-            )).scalars().first()
-            if session is None:
-                await interaction.response.send_message(
-                    "No active session. Use `/recruit-now` first.",
-                    ephemeral=True,
-                )
-                return
+            if game_date:
+                # Parse and validate date
+                try:
+                    target_date = datetime.strptime(game_date, "%Y-%m-%d").date()
+                except ValueError:
+                    await interaction.response.send_message(
+                        "Date must be YYYY-MM-DD format (e.g. `2026-05-14`).",
+                        ephemeral=True,
+                    )
+                    return
+                if target_date.weekday() != 3:  # Thursday = 3
+                    await interaction.response.send_message(
+                        "Date must be a Thursday.",
+                        ephemeral=True,
+                    )
+                    return
+                session = (await db.execute(
+                    select(InhouseSession).where(InhouseSession.game_date == target_date)
+                )).scalars().first()
+                if session is None:
+                    await interaction.response.send_message(
+                        f"No session for {game_date}. Run `/recruit-now game_date:{game_date}` first.",
+                        ephemeral=True,
+                    )
+                    return
+            else:
+                # Fallback: soonest active session (recruiting or matched)
+                session = (await db.execute(
+                    select(InhouseSession)
+                    .where(InhouseSession.status.in_(["recruiting", "matched"]))
+                    .order_by(InhouseSession.game_date.asc())
+                )).scalars().first()
+                if session is None:
+                    await interaction.response.send_message(
+                        "No active session. Use `/recruit-now` first or specify `game_date:`.",
+                        ephemeral=True,
+                    )
+                    return
 
         await interaction.response.send_modal(ManualMatchModal(session.id))
