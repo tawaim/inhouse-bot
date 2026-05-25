@@ -25,9 +25,11 @@ from typing import Optional
 # ---------- Tuning constants ----------
 
 DEFAULT_ELO = 1200
-K_NEW = 40              # players with < K_THRESHOLD games
-K_ESTABLISHED = 20
+K_NEW = 60              # players with < K_THRESHOLD games (faster early convergence)
+K_ESTABLISHED = 50
 K_THRESHOLD = 10        # games-played boundary
+# At these K's, a decisive series (2-0) vs an even opponent moves ±25 (established)
+# / ±30 (new); a 2-1 moves ±8 / ±10 (less, since the series was closer).
 
 INHOUSE_ROLE = "INHOUSE"
 

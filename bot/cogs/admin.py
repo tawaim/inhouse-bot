@@ -10,7 +10,7 @@ from typing import Literal, Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
-from sqlalchemy import select
+from sqlalchemy import delete, func, select, update
 
 from bot.config import Config, ROLES
 from bot.db.models import GuildConfig, Match, MatchPerformance, Player, ProposalSet, Rating, Session as InhouseSession, Signup
@@ -840,6 +840,58 @@ class AdminCog(commands.Cog):
             f"({result['rows_updated']} rating rows) · "
             f"inhouse_modifier preserved · "
             f"{result['errors']} errors",
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="clear-matches",
+        description="(admin) Delete ALL matches and reset every player's inhouse elo. Destructive.",
+    )
+    @app_commands.describe(confirm="Type 'yes' to confirm — this cannot be undone")
+    async def clear_matches(self, interaction: discord.Interaction, confirm: str = ""):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+
+        # Show what will be destroyed and require explicit confirmation first.
+        async with get_session() as db:
+            match_count = (await db.execute(select(func.count(Match.id)))).scalar_one()
+            rating_count = (await db.execute(select(func.count(Rating.discord_id)))).scalar_one()
+
+        if confirm.lower() != "yes":
+            await interaction.response.send_message(
+                f"⚠️ This deletes **all {match_count} match(es)** (and their per-game stats and "
+                f"pending proposals) and resets **{rating_count} rating row(s)** — "
+                f"`inhouse_modifier` and `games_played` go to 0, so elo falls back to `base_seed`. "
+                f"Player Riot links, base seeds, sessions, and signups are kept. "
+                f"**This cannot be undone.** Run again with `confirm:yes` to proceed.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        async with get_session() as db:
+            # Delete in FK-dependency order: rows referencing matches first.
+            await db.execute(delete(MatchPerformance))
+            await db.execute(delete(ProposalSet))
+            deleted = (await db.execute(delete(Match))).rowcount
+            # Reset accumulated inhouse results; keep base_seed (rank-derived).
+            reset = (await db.execute(
+                update(Rating).values(
+                    inhouse_modifier=0,
+                    games_played=0,
+                    elo=Rating.base_seed,
+                )
+            )).rowcount
+            await db.commit()
+
+        log.info(
+            "clear-matches by %s: deleted %s matches, reset %s ratings",
+            interaction.user.id, deleted, reset,
+        )
+        await interaction.followup.send(
+            f"🧹 Cleared **{deleted} match(es)** and reset **{reset} rating row(s)** "
+            f"(elo back to base seed). Riot links and base seeds preserved.",
             ephemeral=True,
         )
 

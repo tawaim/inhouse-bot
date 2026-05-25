@@ -91,8 +91,8 @@ def test_k_factor_drops_after_threshold():
     _, delta_old = update_elo(1500, 1500, won=True, games_played=K_THRESHOLD)
     # Both winners against equal opponent, but new player gains more
     assert delta_new > delta_old
-    assert delta_new == K_NEW // 2  # round(40 * 0.5) = 20
-    assert delta_old == K_ESTABLISHED // 2  # round(20 * 0.5) = 10
+    assert delta_new == K_NEW // 2  # round(60 * 0.5) = 30
+    assert delta_old == K_ESTABLISHED // 2  # round(50 * 0.5) = 25
 
 
 def test_average_elo_simple():
@@ -107,8 +107,8 @@ def test_full_matchup_team_avg_diff():
     """A team of 1700s beating a team of 1300s — winners gain less than peers would."""
     # Team1 (avg 1700) beats Team2 (avg 1300). Each team1 player's gain < gain vs peer.
     _, delta = update_elo(1700, 1300, won=True, games_played=20)
-    # Expected score against 1300 is ~0.91; only 9% of K=20 = ~2 elo
-    assert 1 <= delta <= 3
+    # Expected score against 1300 is ~0.91; only ~9% of K=50 = ~5 elo
+    assert 3 <= delta <= 7
 
 
 def test_past_season_is_division_aware():
@@ -187,14 +187,14 @@ def test_series_loss_costs_appropriately():
 
 
 def test_series_2_0_equal_peers():
-    """vs equal opponent, expected = 0.5, actual 1.0, K=20 -> +10 elo."""
+    """vs equal opponent, expected = 0.5, actual 1.0, K=50 -> +25 elo."""
     from bot.services.elo import update_elo_series
     _, delta = update_elo_series(1500, 1500, 2, 0, games_played=20)
-    assert delta == 10
+    assert delta == 25
 
 
 def test_series_2_1_equal_peers():
-    """vs equal opponent, expected = 0.5, actual 0.667, K=20 -> +3 elo."""
+    """vs equal opponent, expected = 0.5, actual 0.667, K=50 -> +8 elo."""
     from bot.services.elo import update_elo_series
     _, delta = update_elo_series(1500, 1500, 2, 1, games_played=20)
-    assert delta == 3
+    assert delta == 8
