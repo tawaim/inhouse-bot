@@ -40,13 +40,6 @@ class RankEntry:
 
 
 @dataclass
-class HistoricalRank:
-    """Last season's peak rank, exposed by league-v4 even for currently-unranked players."""
-    queue_type: str
-    tier: str         # e.g. "DIAMOND" — note no rank/division on historical
-
-
-@dataclass
 class MatchSummary:
     """Subset of match-v5 fields we care about for skill signals."""
     match_id: str
@@ -84,11 +77,11 @@ class RiotClient:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def _get(self, url: str) -> Optional[dict[str, Any]]:
-        """GET with rate-limit handling. Returns None on 404."""
+    async def _get(self, url: str, params: Optional[dict[str, Any]] = None) -> Optional[Any]:
+        """GET with rate-limit handling. Returns parsed JSON (dict or list), or None on 404."""
         async with self._sem:
             for attempt in range(3):
-                resp = await self._client.get(url)
+                resp = await self._client.get(url, params=params)
                 if resp.status_code == 200:
                     return resp.json()
                 if resp.status_code == 404:
@@ -152,28 +145,6 @@ class RiotClient:
                 return entry
         return None
 
-    async def get_historical_solo_rank(self, puuid: str) -> Optional[HistoricalRank]:
-        """Return the player's most recent solo-queue 'highestTierAchieved'
-        from league-v4. Riot exposes this even on currently-unplaced entries
-        (i.e., players who have placement matches in but haven't played enough
-        to fully rank). Returns None if no info is available — a fully untouched
-        account with no historical participation will not have this exposed.
-        """
-        url = (
-            f"https://{self.region}.api.riotgames.com"
-            f"/lol/league/v4/entries/by-puuid/{puuid}"
-        )
-        data = await self._get(url)
-        if not data:
-            return None
-        for e in data:
-            if e.get("queueType") == "RANKED_SOLO_5x5" and e.get("highestTierAchieved"):
-                return HistoricalRank(
-                    queue_type="RANKED_SOLO_5x5",
-                    tier=e["highestTierAchieved"],
-                )
-        return None
-
     # --- match-v5 (regional) ---
 
     async def get_recent_match_ids(self, puuid: str, count: int = 20, queue: int = 420) -> list[str]:
@@ -182,17 +153,12 @@ class RiotClient:
             f"https://{self.regional_route}.api.riotgames.com"
             f"/lol/match/v5/matches/by-puuid/{puuid}/ids"
         )
-        params = {"count": count}
+        params: dict[str, Any] = {"count": count}
         if queue:
             params["queue"] = queue
-        async with self._sem:
-            resp = await self._client.get(url, params=params)
-        if resp.status_code == 200:
-            return resp.json()
-        if resp.status_code == 404:
-            return []
-        resp.raise_for_status()
-        return []
+        # Route through _get so 429/5xx are retried with backoff, like every other call.
+        data = await self._get(url, params=params)
+        return data or []
 
     async def get_match_summary(self, match_id: str, puuid: str) -> Optional[MatchSummary]:
         url = (

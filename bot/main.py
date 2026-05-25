@@ -15,6 +15,7 @@ from bot.cogs.recruitment import RecruitmentCog
 from bot.cogs.stats import StatsCog
 from bot.config import Config
 from bot.db.session import close_db, init_db
+from bot.services.opgg_client import OpggClient
 from bot.services.riot_client import RiotClient
 from bot.services.scheduler import setup_scheduler
 
@@ -39,11 +40,13 @@ async def amain() -> None:
         region=config.riot_region,
         regional_route=config.riot_regional_route,
     )
+    # OP.GG supplies past-season ranks (Riot's API can't) for seeding unranked players.
+    opgg = OpggClient()
 
     # Register cogs
-    await bot.add_cog(LinkingCog(bot, config, riot))
+    await bot.add_cog(LinkingCog(bot, config, riot, opgg))
     await bot.add_cog(RecruitmentCog(bot, config))
-    await bot.add_cog(AdminCog(bot, config, riot))
+    await bot.add_cog(AdminCog(bot, config, riot, opgg))
     await bot.add_cog(StatsCog(bot))
 
     @bot.event
@@ -81,6 +84,7 @@ async def amain() -> None:
     scheduler.shutdown(wait=False)
     await bot.close()
     await riot.close()
+    await opgg.close()
     await close_db()
     for task in pending:
         task.cancel()

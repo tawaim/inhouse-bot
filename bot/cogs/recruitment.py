@@ -39,6 +39,7 @@ from bot.config import Config, ROLE_EMOJIS, ROLES
 from bot.db.models import GuildConfig, Match, MatchPerformance, Player, ProposalSet, Rating, Session as InhouseSession, Signup
 from bot.db.session import get_session
 from bot.services.matchmaking import MatchProposal, PlayerInput, TeamAssignment, make_match, make_top_matches
+from bot.cogs.admin import format_roster_block
 
 log = logging.getLogger(__name__)
 
@@ -618,6 +619,7 @@ class RecruitmentCog(commands.Cog):
                     await self.bot.fetch_user(self.config.owner_discord_id)
         except (discord.NotFound, discord.HTTPException):
             log.error("Could not fetch owner user %s", self.config.owner_discord_id)
+            await self._warn_owner_dm_failed(session_id)
             return
 
         async with get_session() as db:
@@ -662,6 +664,7 @@ class RecruitmentCog(commands.Cog):
             msg = await owner.send(embeds=[intro] + embeds, view=view)
         except (discord.Forbidden, discord.HTTPException) as e:
             log.error("Could not DM owner: %s", e)
+            await self._warn_owner_dm_failed(session_id)
             return
 
         async with get_session() as db:
@@ -669,6 +672,25 @@ class RecruitmentCog(commands.Cog):
             if ps:
                 ps.dm_message_id = msg.id
                 await db.commit()
+
+    async def _warn_owner_dm_failed(self, session_id: int) -> None:
+        """Fallback when the owner can't be DM'd the match options: post a notice
+        in the recruit channel so the session isn't silently wedged with no teams."""
+        async with get_session() as db:
+            session = await db.get(InhouseSession, session_id)
+        if session is None or session.recruit_channel_id is None:
+            return
+        channel = self.bot.get_channel(session.recruit_channel_id)
+        if channel is None:
+            return
+        try:
+            await channel.send(
+                "⚠️ Teams are ready, but I couldn't DM the bot owner the options to choose from. "
+                "An admin can finalize manually with `/manual-match`, or the owner should enable DMs "
+                "and re-run `/test-trigger-close`."
+            )
+        except discord.HTTPException:
+            log.exception("Failed to post owner-DM-failure warning to channel")
 
     # ---------- Slash commands ----------
 
@@ -759,6 +781,80 @@ class RecruitmentCog(commands.Cog):
             content=f"Top {len(proposals)} options (preview only — no commit):",
             embeds=embeds,
             ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="roster-template",
+        description="(admin) Build an editable copy/paste roster from the current signups.",
+    )
+    async def roster_template(self, interaction: discord.Interaction):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        async with get_session() as db:
+            session = (await db.execute(
+                select(InhouseSession).where(InhouseSession.status == "recruiting")
+                .order_by(InhouseSession.game_date.asc())
+            )).scalars().first()
+            if session is None:
+                await interaction.followup.send("No active recruiting session.", ephemeral=True)
+                return
+            playing = (await db.execute(
+                select(Signup)
+                .where(Signup.session_id == session.id)
+                .where(Signup.status == "playing")
+            )).scalars().all()
+            if len(playing) < 10:
+                await interaction.followup.send(
+                    f"Only {len(playing)} playing signups — need 10 to build a template.",
+                    ephemeral=True,
+                )
+                return
+            ordered = sorted(playing, key=lambda s: s.signed_up_at)[:10]
+            player_inputs = []
+            names: dict[int, str] = {}
+            for su in ordered:
+                ratings = (await db.execute(
+                    select(Rating).where(Rating.discord_id == su.discord_id)
+                )).scalars().all()
+                ratings_dict = {r.role: r.elo for r in ratings}
+                for role in ROLES:
+                    ratings_dict.setdefault(role, 1200)
+                player_inputs.append(PlayerInput(
+                    discord_id=su.discord_id,
+                    preferred_roles=su.role_list,
+                    ratings=ratings_dict,
+                ))
+                p = await db.get(Player, su.discord_id)
+                names[su.discord_id] = p.riot_game_name if p and p.riot_game_name else f"<@{su.discord_id}>"
+
+        # Best-effort balanced seating as a starting point; fall back to arbitrary
+        # seating (still a valid 5v5 block) if role coverage makes a balance impossible.
+        proposal = make_match(player_inputs)
+        if proposal:
+            team1, team2 = proposal.team1.by_role, proposal.team2.by_role
+            note = (f"Balanced starting point (skill diff {proposal.balance_diff:.0f}, "
+                    f"off-role {proposal.role_penalty:.1f}).")
+        else:
+            ids = [su.discord_id for su in ordered]
+            team1 = {ROLES[i]: ids[i] for i in range(5)}
+            team2 = {ROLES[i]: ids[5 + i] for i in range(5)}
+            note = ("⚠️ No balanced role assignment possible from current prefs — players "
+                    "seated arbitrarily; fix the roles before submitting.")
+
+        def who(team: dict[str, int]) -> str:
+            return ", ".join(f"{r} {names.get(team[r], team[r])}" for r in ROLES if r in team)
+
+        content = (
+            f"🧩 Template from {len(ordered)} signups for **{session.game_date.strftime('%b %d')}**. {note}\n"
+            f"Copy, edit, and paste into `/manual-match`:\n"
+            f"```\n{format_roster_block(team1, team2)}\n```\n"
+            f"**Team 1** — {who(team1)}\n"
+            f"**Team 2** — {who(team2)}"
+        )
+        await interaction.followup.send(
+            content, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
         )
 
     # ---------- Helpers ----------

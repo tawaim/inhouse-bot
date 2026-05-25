@@ -157,6 +157,11 @@ class MatchPerformance(Base):
     deaths: Mapped[Optional[int]] = mapped_column(Integer)
     assists: Mapped[Optional[int]] = mapped_column(Integer)
     won: Mapped[bool] = mapped_column(Boolean)
+    # Elo deltas this match applied to the player's role rating and INHOUSE rating.
+    # Stored so /unreport can reverse a series exactly (elo updates aren't trivially
+    # invertible since K-factor depends on games_played and averages are pre-match).
+    role_elo_delta: Mapped[int] = mapped_column(Integer, default=0)
+    inhouse_elo_delta: Mapped[int] = mapped_column(Integer, default=0)
 
     match: Mapped[Match] = relationship(back_populates="performances")
 

@@ -20,12 +20,13 @@ from bot.services.elo import (
     INHOUSE_ROLE,
     average_elo,
     parse_series_score,
-    seed_from_historical_rank,
+    seed_from_past_season,
     seed_from_rank,
     update_elo,
     update_elo_series,
 )
 from bot.services.ocr import parse_screenshot
+from bot.services.opgg_client import OpggClient
 from bot.services.riot_client import RiotAuthError, RiotClient
 
 log = logging.getLogger(__name__)
@@ -146,6 +147,19 @@ def parse_manual_match(text: str) -> tuple[dict[str, int], dict[str, int]]:
     return teams[1], teams[2]
 
 
+def format_roster_block(team1: dict[str, int], team2: dict[str, int]) -> str:
+    """Render two role->discord_id team dicts as the line-based roster that
+    parse_manual_match accepts. Inverse of parse_manual_match:
+        parse_manual_match(format_roster_block(t1, t2)) == (t1, t2)
+    Used by /match-roster to print a copy/paste-ready, editable roster.
+    """
+    lines = ["TEAM 1"]
+    lines += [f"{r}: <@{team1[r]}>" for r in ROLES if r in team1]
+    lines.append("TEAM 2")
+    lines += [f"{r}: <@{team2[r]}>" for r in ROLES if r in team2]
+    return "\n".join(lines)
+
+
 # =============================================================================
 # Modal for /manual-match input
 # =============================================================================
@@ -168,9 +182,17 @@ class ManualMatchModal(discord.ui.Modal, title="Manual Match Entry"):
         ),
     )
 
-    def __init__(self, session_id: int):
+    def __init__(
+        self,
+        session_id: Optional[int],
+        edit_match_id: Optional[int] = None,
+        prefill: Optional[str] = None,
+    ):
         super().__init__()
         self.session_id = session_id
+        self.edit_match_id = edit_match_id  # when set, UPDATE this match instead of creating one
+        if prefill:
+            self.roster.default = prefill   # pre-fills the text box for in-place editing
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -183,8 +205,8 @@ class ManualMatchModal(discord.ui.Modal, title="Manual Match Entry"):
 
         all_ids = list(team1.values()) + list(team2.values())
 
-        # Verify every mentioned user is linked
         async with get_session() as db:
+            # Verify every mentioned user is linked + approved
             unlinked = []
             for pid in all_ids:
                 player = await db.get(Player, pid)
@@ -199,41 +221,93 @@ class ManualMatchModal(discord.ui.Modal, title="Manual Match Entry"):
                 )
                 return
 
-            # Create the Match row
-            match = Match(
-                session_id=self.session_id,
-                team1_json=json.dumps(team1),
-                team2_json=json.dumps(team2),
-                predicted_balance=None,  # n/a for manual
-            )
-            db.add(match)
-            session = await db.get(InhouseSession, self.session_id)
+            if self.edit_match_id is not None:
+                # Edit-in-place: replace an existing match's roster.
+                match = await db.get(Match, self.edit_match_id)
+                if match is None:
+                    await interaction.followup.send(
+                        f"❌ Match {self.edit_match_id} no longer exists.", ephemeral=True
+                    )
+                    return
+                if match.winner is not None:
+                    await interaction.followup.send(
+                        "❌ That match is already reported — run `/unreport` first, then edit.",
+                        ephemeral=True,
+                    )
+                    return
+                match.team1_json = json.dumps(team1)
+                match.team2_json = json.dumps(team2)
+                verb = "updated"
+            else:
+                match = Match(
+                    session_id=self.session_id,
+                    team1_json=json.dumps(team1),
+                    team2_json=json.dumps(team2),
+                    predicted_balance=None,  # n/a for manual
+                )
+                db.add(match)
+                verb = "created"
+
+            session = await db.get(InhouseSession, match.session_id) if match.session_id else None
             if session and session.status == "recruiting":
                 session.status = "matched"
             await db.commit()
             await db.refresh(match)
+            match_id = match.id
+            game_date = session.game_date if session else None
+            channel_id = session.recruit_channel_id if session else None
 
-        # Post to recruit channel
+        # Post the (new or updated) teams to the recruit channel, if there is one.
         from bot.config import ROLE_EMOJIS
-        embed = discord.Embed(
-            title=f"🏆 Manual Teams for Thursday {session.game_date.strftime('%b %d')}",
-            color=discord.Color.green(),
-        )
+        title = "🏆 Updated Teams" if verb == "updated" else "🏆 Manual Teams"
+        if game_date:
+            title += f" for Thursday {game_date.strftime('%b %d')}"
+        embed = discord.Embed(title=title, color=discord.Color.green())
         t1 = "\n".join(f"{ROLE_EMOJIS[r]} **{r}**: <@{team1[r]}>" for r in ROLES)
         t2 = "\n".join(f"{ROLE_EMOJIS[r]} **{r}**: <@{team2[r]}>" for r in ROLES)
         embed.add_field(name="🔵 Team 1 (Blue)", value=t1, inline=True)
         embed.add_field(name="🔴 Team 2 (Red)", value=t2, inline=True)
-        embed.set_footer(text=f"Match {match.id} · Manual entry by {interaction.user.display_name}")
+        embed.set_footer(text=f"Match {match_id} · Manual entry by {interaction.user.display_name}")
 
-        if session and session.recruit_channel_id:
-            channel = interaction.client.get_channel(session.recruit_channel_id)
+        if channel_id:
+            channel = interaction.client.get_channel(channel_id)
             if channel:
-                await channel.send(content="🔒 Teams (manually set):", embed=embed)
+                await channel.send(content=f"🔒 Teams ({verb}):", embed=embed)
 
+        posted = " Posted to recruit channel." if channel_id else ""
         await interaction.followup.send(
-            f"✅ Match {match.id} created with manual roster. Posted to recruit channel.\n"
-            f"When games are played, report the result with `/report` or `/report-manual`.",
+            f"✅ Match {match_id} {verb} with manual roster.{posted}\n"
+            f"Report the result with `/report` or `/report-manual` when games are done.",
             ephemeral=True,
+        )
+
+
+class EditRosterView(discord.ui.View):
+    """Ephemeral 'Edit teams' button attached to /match-roster. Opens the manual
+    roster modal pre-filled with the current teams and updates the match in place."""
+
+    def __init__(self, match_id: int):
+        super().__init__(timeout=300)
+        self.match_id = match_id
+
+    @discord.ui.button(label="Edit teams", style=discord.ButtonStyle.primary, emoji="✏️")
+    async def edit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with get_session() as db:
+            match = await db.get(Match, self.match_id)
+            if match is None:
+                await interaction.response.send_message("That match no longer exists.", ephemeral=True)
+                return
+            if match.winner is not None:
+                await interaction.response.send_message(
+                    "That match is already reported — run `/unreport` first, then edit.", ephemeral=True
+                )
+                return
+            team1 = {k: int(v) for k, v in json.loads(match.team1_json).items()}
+            team2 = {k: int(v) for k, v in json.loads(match.team2_json).items()}
+            session_id = match.session_id
+        await interaction.response.send_modal(
+            ManualMatchModal(session_id, edit_match_id=self.match_id,
+                             prefill=format_roster_block(team1, team2))
         )
 
 
@@ -346,10 +420,11 @@ class PickupSeriesModal(discord.ui.Modal, title="Pickup Series Result"):
 
 
 class AdminCog(commands.Cog):
-    def __init__(self, bot: commands.Bot, config: Config, riot: RiotClient):
+    def __init__(self, bot: commands.Bot, config: Config, riot: RiotClient, opgg: OpggClient):
         self.bot = bot
         self.config = config
         self.riot = riot
+        self.opgg = opgg
 
     async def _is_admin(self, interaction: discord.Interaction) -> bool:
         if not isinstance(interaction.user, discord.Member):
@@ -558,6 +633,78 @@ class AdminCog(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(
+        name="unreport",
+        description="(admin) Undo a reported series — reverses the elo and clears the result.",
+    )
+    @app_commands.describe(match_id="The match ID to un-report (lets you re-report with a corrected score)")
+    async def unreport(self, interaction: discord.Interaction, match_id: int):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        status, count, prev_score = await self._revert_result(match_id)
+        if status == "not_found":
+            await interaction.followup.send(f"Match {match_id} not found.", ephemeral=True)
+            return
+        if status == "not_reported":
+            await interaction.followup.send(
+                f"Match {match_id} hasn't been reported — nothing to undo.", ephemeral=True
+            )
+            return
+        await interaction.followup.send(
+            f"✅ Un-reported match {match_id} (was {prev_score}). Reversed elo for {count} players. "
+            f"You can now re-report it with the correct score.",
+            ephemeral=True,
+        )
+
+    async def _revert_result(self, match_id: int) -> tuple[str, int, str]:
+        """Reverse a reported series (mirror of _commit_result). Returns
+        (status, players_reversed, prev_score) where status is
+        'ok' | 'not_found' | 'not_reported'."""
+        async with get_session() as db:
+            match = await db.get(Match, match_id)
+            if match is None:
+                return ("not_found", 0, "")
+            if match.winner is None:
+                return ("not_reported", 0, "")
+
+            perfs = (await db.execute(
+                select(MatchPerformance).where(MatchPerformance.match_id == match_id)
+            )).scalars().all()
+
+            # Reverse each player's stored deltas on their role + INHOUSE ratings,
+            # and decrement games_played. This exactly restores pre-report state.
+            for perf in perfs:
+                role_rating = await db.get(Rating, (perf.discord_id, perf.role))
+                if role_rating is not None:
+                    role_rating.inhouse_modifier -= perf.role_elo_delta or 0
+                    role_rating.games_played = max(0, role_rating.games_played - 1)
+                    role_rating.elo = role_rating.base_seed + role_rating.inhouse_modifier
+                overall = await db.get(Rating, (perf.discord_id, INHOUSE_ROLE))
+                if overall is not None:
+                    overall.inhouse_modifier -= perf.inhouse_elo_delta or 0
+                    overall.games_played = max(0, overall.games_played - 1)
+                    overall.elo = overall.base_seed + overall.inhouse_modifier
+                await db.delete(perf)
+
+            prev_score = f"{match.team1_wins}-{match.team2_wins}"
+            match.winner = None
+            match.team1_wins = 0
+            match.team2_wins = 0
+            match.reported_by = None
+            match.reported_at = None
+            match.screenshot_url = None
+
+            # Roll the session back from completed -> matched so it reads as un-played.
+            if match.session_id is not None:
+                session = await db.get(InhouseSession, match.session_id)
+                if session and session.status == "completed":
+                    session.status = "matched"
+
+            await db.commit()
+        return ("ok", len(perfs), prev_score)
+
     @app_commands.command(name="sync-ranks", description="(admin) Refresh Riot rank for all linked players. Updates base_seed only.")
     async def sync_ranks(self, interaction: discord.Interaction):
         if not await self._is_admin(interaction):
@@ -590,19 +737,21 @@ class AdminCog(commands.Cog):
             for player in players:
                 try:
                     rank = await self.riot.get_solo_rank(player.riot_puuid)
-                    historical = None
+                    past = None
                     if rank is None:
-                        historical = await self.riot.get_historical_solo_rank(player.riot_puuid)
+                        past = await self.opgg.get_past_season_rank(
+                            player.riot_game_name, player.riot_tag_line, player.region
+                        )
 
                     if rank:
                         player.solo_tier = rank.tier
                         player.solo_rank = rank.rank
                         player.solo_lp = rank.league_points
                         new_seed = seed_from_rank(rank.tier, rank.rank)
-                    elif historical:
-                        new_seed = seed_from_historical_rank(historical.tier)
+                    elif past:
+                        new_seed = seed_from_past_season(past.tier, past.division, past.seasons_elapsed)
                     else:
-                        new_seed = None  # no rank info; leave base_seed as-is
+                        new_seed = None  # no current or past rank anywhere; leave base_seed as-is
 
                     player.riot_last_synced = datetime.utcnow()
                     updated += 1
@@ -682,8 +831,17 @@ class AdminCog(commands.Cog):
             match = await db.get(Match, match_id)
             if match is None:
                 return
+            if match.winner is not None:
+                # Already reported. Idempotent guard: the /report flow checks this
+                # in a separate session before a 120s reaction wait, so without
+                # re-checking here a second /report (or a racing /report-manual)
+                # would double-apply elo. Bail out instead.
+                return
             team1: dict[str, int] = {k: int(v) for k, v in json.loads(match.team1_json).items()}
             team2: dict[str, int] = {k: int(v) for k, v in json.loads(match.team2_json).items()}
+
+            # Per-player elo deltas applied this match, so /unreport can reverse them.
+            deltas: dict[int, dict[str, int]] = {}
 
             # Helper: get-or-create a rating row. New rows start at DEFAULT_ELO
             # base_seed with 0 modifier (someone who's never linked but appears
@@ -749,6 +907,7 @@ class AdminCog(commands.Cog):
                 overall.inhouse_modifier += overall_delta
                 overall.elo = overall.base_seed + overall.inhouse_modifier
                 overall.games_played += 1
+                deltas[pid] = {"role": role_delta, "inhouse": overall_delta}
 
             for role, role_rating in t2_role_ratings.items():
                 pid = team2[role]
@@ -770,6 +929,7 @@ class AdminCog(commands.Cog):
                 overall.inhouse_modifier += overall_delta
                 overall.elo = overall.base_seed + overall.inhouse_modifier
                 overall.games_played += 1
+                deltas[pid] = {"role": role_delta, "inhouse": overall_delta}
 
             # Write per-player performance rows. KDA from OCR if available.
             ocr_by_riot_id = {}
@@ -790,15 +950,19 @@ class AdminCog(commands.Cog):
 
             for role, pid in team1.items():
                 k, d, a = await get_kda(pid)
+                pd = deltas.get(pid, {"role": 0, "inhouse": 0})
                 db.add(MatchPerformance(
                     match_id=match.id, discord_id=pid, role=role,
                     kills=k, deaths=d, assists=a, won=team1_won,
+                    role_elo_delta=pd["role"], inhouse_elo_delta=pd["inhouse"],
                 ))
             for role, pid in team2.items():
                 k, d, a = await get_kda(pid)
+                pd = deltas.get(pid, {"role": 0, "inhouse": 0})
                 db.add(MatchPerformance(
                     match_id=match.id, discord_id=pid, role=role,
                     kills=k, deaths=d, assists=a, won=not team1_won,
+                    role_elo_delta=pd["role"], inhouse_elo_delta=pd["inhouse"],
                 ))
 
             match.winner = 1 if team1_wins > team2_wins else 2
@@ -1066,3 +1230,63 @@ class AdminCog(commands.Cog):
         await interaction.response.send_modal(
             PickupSeriesModal(commit_callback=self._commit_result)
         )
+
+    @app_commands.command(
+        name="match-roster",
+        description="(admin) Print a match roster in copy/paste format to edit and re-submit.",
+    )
+    @app_commands.describe(match_id="Match to export (defaults to the most recent match)")
+    async def match_roster(
+        self, interaction: discord.Interaction, match_id: Optional[int] = None
+    ):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        async with get_session() as db:
+            if match_id is None:
+                match = (await db.execute(
+                    select(Match).order_by(Match.id.desc())
+                )).scalars().first()
+            else:
+                match = await db.get(Match, match_id)
+            if match is None:
+                msg = "No matches exist yet." if match_id is None else f"Match {match_id} not found."
+                await interaction.response.send_message(msg, ephemeral=True)
+                return
+            team1 = {k: int(v) for k, v in json.loads(match.team1_json).items()}
+            team2 = {k: int(v) for k, v in json.loads(match.team2_json).items()}
+            ids = list(team1.values()) + list(team2.values())
+            players = {
+                p.discord_id: p for p in (await db.execute(
+                    select(Player).where(Player.discord_id.in_(ids))
+                )).scalars().all()
+            }
+
+        def who(team: dict[str, int]) -> str:
+            parts = []
+            for r in ROLES:
+                if r not in team:
+                    continue
+                p = players.get(team[r])
+                name = p.riot_game_name if p and p.riot_game_name else f"<@{team[r]}>"
+                parts.append(f"{r} {name}")
+            return ", ".join(parts)
+
+        reported = match.winner is not None
+        score = f" · reported {match.team1_wins}-{match.team2_wins}" if reported else ""
+        edit_hint = (
+            "Run `/unreport` to edit it."
+            if reported
+            else "Hit **Edit teams** below to change it in place, or copy the block into "
+                 "`/manual-match` / `/pickup-series`."
+        )
+        content = (
+            f"🧩 **Match {match.id}** roster{score}. {edit_hint}\n"
+            f"```\n{format_roster_block(team1, team2)}\n```\n"
+            f"**Team 1** — {who(team1)}\n"
+            f"**Team 2** — {who(team2)}"
+        )
+        kwargs = dict(ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        if not reported:
+            kwargs["view"] = EditRosterView(match.id)
+        await interaction.response.send_message(content, **kwargs)

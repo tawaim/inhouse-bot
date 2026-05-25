@@ -56,9 +56,11 @@ DIVISION_BONUS = {"I": 150, "II": 100, "III": 50, "IV": 0}
 # Master/GM/Challenger don't have divisions; treat them as flat-tier seeds.
 _FLAT_TIERS = {"MASTER", "GRANDMASTER", "CHALLENGER"}
 
-# How much elo we knock off when seeding from last-season (rust penalty).
-# Equivalent to one full tier (4 divisions = 200 elo).
-RUST_PENALTY = 200
+# Rust/decay applied when seeding a currently-unranked player from a PAST season.
+# Decay scales with how stale the placement is: DECAY_PER_SEASON elo per whole
+# season elapsed since the placement, capped at MAX_DECAY (see seed_from_past_season).
+DECAY_PER_SEASON = 100   # one division per season elapsed
+MAX_DECAY = 400          # never knock off more than two full tiers
 
 
 def seed_from_rank(tier: Optional[str], division: Optional[str]) -> int:
@@ -77,21 +79,24 @@ def seed_from_rank(tier: Optional[str], division: Optional[str]) -> int:
     return base + DIVISION_BONUS.get((division or "IV").upper(), 0)
 
 
-def seed_from_historical_rank(tier: Optional[str]) -> int:
-    """Seed from last-season's `highestTierAchieved` field, applying a
-    fixed -200 elo rust penalty (one full tier worth of rust).
+def seed_from_past_season(
+    tier: Optional[str], division: Optional[str], seasons_elapsed: int = 0
+) -> int:
+    """Seed a currently-unranked player from their most recent PAST-SEASON
+    Solo/Duo rank (sourced from OP.GG, since Riot's API has no history).
 
-    No division info is available on `highestTierAchieved`, so we treat
-    it as bottom-of-tier (IV-equivalent) before applying the penalty.
-    Floored at IRON's seed value — can't go lower than 800.
+    Division-aware: starts from the exact ladder seed for the past tier+division
+    (e.g. Emerald III = 1850), then applies recency decay of DECAY_PER_SEASON elo
+    per whole season elapsed since the placement, capped at MAX_DECAY. Floored at
+    IRON's seed value (800). Unknown/missing tier falls back to DEFAULT_ELO (1200).
+
+    Example: Emerald III, 1 season ago -> 1850 - 100 = 1750.
     """
-    if not tier:
+    if not tier or tier.upper() not in TIER_SEED:
         return DEFAULT_ELO
-    tier = tier.upper()
-    base = TIER_SEED.get(tier)
-    if base is None:
-        return DEFAULT_ELO
-    return max(TIER_SEED["IRON"], base - RUST_PENALTY)
+    base = seed_from_rank(tier, division)
+    decay = min(DECAY_PER_SEASON * max(0, seasons_elapsed), MAX_DECAY)
+    return max(TIER_SEED["IRON"], base - decay)
 
 
 def expected_score(player_elo: int, opponent_elo: int) -> float:

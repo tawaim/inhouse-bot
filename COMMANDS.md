@@ -22,7 +22,7 @@ Submit a request to link your Discord account to a League of Legends account.
 1. Bot validates the Riot ID against Riot's API
 2. Creates a pending link request
 3. **DMs the bot owner** with Approve / Reject buttons
-4. Owner clicks Approve → bot pulls your solo queue rank and recent match history, seeds your inhouse elo accordingly, and DMs you the confirmation
+4. Owner clicks Approve → bot pulls your solo queue rank and recent match history, seeds your inhouse elo accordingly, and DMs you the confirmation. If you're unranked this split, it falls back to your most recent past-season Solo/Duo rank (via OP.GG), decayed by how long ago that was; with no ranked history at all you start at 1200.
 5. Owner clicks Reject → opens a reason prompt, then DMs you with the reason
 
 You can't use other commands that depend on linking until your request is approved.
@@ -150,6 +150,20 @@ SUPPORT: @jack
 
 When validated, the match is created and posted publicly to the recruit channel. Works even after the auto-matchmaker has already run.
 
+### `/match-roster [match_id]` (admin)
+
+Prints an existing match's roster in the exact format `/manual-match` and `/pickup-series` accept, inside an ephemeral code block — so you don't have to retype @-mentions when editing teams. Defaults to the most recent match if `match_id` is omitted.
+
+Two ways to edit from here:
+- **Edit teams** button — if the match isn't reported yet, click it to open the roster modal **pre-filled** with the current teams. Submitting **updates the existing match in place** (no duplicate match created).
+- **Copy/paste** — copy the code block, change whatever lines you need, then paste into `/manual-match` (sets teams) or `/pickup-series` (sets teams + a score).
+
+The output also lists each player's Riot name so you can tell who's who. The message is ephemeral (only you see it). A reported match can't be edited — `/unreport` it first.
+
+### `/roster-template` (admin)
+
+Builds an editable roster from the **current signups** before any teams exist. Takes the first 10 playing signups, runs the matchmaker for a balanced starting point, and prints it as a copy/paste block (falling back to arbitrary seating if role coverage makes a balance impossible). Copy it, tweak the roles/players, and paste into `/manual-match`. Ephemeral.
+
 ### `/sync-ranks` (admin)
 
 Refreshes Riot API rank data for every linked-and-approved player. Useful to call before a game night so seeding reflects current ranks.
@@ -182,6 +196,14 @@ Same as `/report` but skips OCR. Use when you don't have a screenshot or OCR is 
 - `winner` — `team1` or `team2`
 
 Updates ratings the same way as `/report`. Per-player performance rows are still created but with KDA fields blank.
+
+### `/unreport <match_id>` (admin)
+
+Undo a reported series. Reverses the elo deltas that the report applied (on both the role and INHOUSE ratings), decrements each player's `games_played`, deletes the performance rows, and clears the result so the match can be re-reported with the correct score.
+
+Use this to fix a mis-entered series score — e.g. you reported `2-0` but it was `0-2`. Run `/unreport <match_id>`, then `/report-manual` again with the right score.
+
+Note: reversal is exact for matches reported after this feature shipped (deltas are stored per match). Matches reported earlier have no stored deltas, so `/unreport` will clear the result and decrement games but cannot restore the old modifier precisely.
 
 ---
 

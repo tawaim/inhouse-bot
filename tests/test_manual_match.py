@@ -1,7 +1,7 @@
 """Tests for the /manual-match input parser."""
 import pytest
 
-from bot.cogs.admin import ManualMatchParseError, parse_manual_match
+from bot.cogs.admin import ManualMatchParseError, format_roster_block, parse_manual_match
 
 
 VALID_ROSTER = """\
@@ -114,3 +114,11 @@ def test_garbage_line_rejected():
     text = VALID_ROSTER + "this is just garbage\n"
     with pytest.raises(ManualMatchParseError, match="ROLE: @user"):
         parse_manual_match(text)
+
+
+def test_format_roster_block_roundtrips():
+    """/match-roster output must parse back to the same teams via /manual-match."""
+    t1 = {"TOP": 1, "JUNGLE": 2, "MID": 3, "BOT": 4, "SUPPORT": 5}
+    t2 = {"TOP": 6, "JUNGLE": 7, "MID": 8, "BOT": 9, "SUPPORT": 10}
+    block = format_roster_block(t1, t2)
+    assert parse_manual_match(block) == (t1, t2)

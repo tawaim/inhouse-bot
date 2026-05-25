@@ -111,32 +111,42 @@ def test_full_matchup_team_avg_diff():
     assert 1 <= delta <= 3
 
 
-def test_historical_rank_applies_rust_penalty():
-    """Last-season rank should seed -200 elo from current-rank-IV equivalent."""
-    from bot.services.elo import seed_from_historical_rank, RUST_PENALTY
-    # Emerald IV current = 1800. Emerald historical = 1800 - 200 = 1600 (= Plat IV)
-    assert seed_from_historical_rank("EMERALD") == seed_from_rank("PLATINUM", "IV")
-    # Diamond historical = 2000 - 200 = 1800 (= Emerald IV)
-    assert seed_from_historical_rank("DIAMOND") == seed_from_rank("EMERALD", "IV")
-    # The penalty is exactly 200
-    assert seed_from_historical_rank("EMERALD") == 1800 - RUST_PENALTY
+def test_past_season_is_division_aware():
+    """Past-season seed starts from the exact tier+division ladder value."""
+    from bot.services.elo import seed_from_past_season
+    # Emerald III, freshly placed (0 seasons elapsed) -> no decay -> 1850.
+    assert seed_from_past_season("EMERALD", "III", 0) == seed_from_rank("EMERALD", "III")
+    assert seed_from_past_season("EMERALD", "III", 0) == 1850
 
 
-def test_historical_rank_iron_floors_at_iron():
-    """Iron has no lower seed; should stay at IRON's value (800)."""
-    from bot.services.elo import seed_from_historical_rank, TIER_SEED
-    assert seed_from_historical_rank("IRON") == TIER_SEED["IRON"]
+def test_past_season_decays_per_season():
+    """Each elapsed season knocks off DECAY_PER_SEASON, capped at MAX_DECAY."""
+    from bot.services.elo import seed_from_past_season, DECAY_PER_SEASON, MAX_DECAY
+    base = seed_from_rank("EMERALD", "III")  # 1850
+    assert seed_from_past_season("EMERALD", "III", 1) == base - DECAY_PER_SEASON  # 1750
+    assert seed_from_past_season("EMERALD", "III", 2) == base - 2 * DECAY_PER_SEASON  # 1650
+    # Decay is capped: a Challenger from many seasons ago loses at most MAX_DECAY.
+    assert seed_from_past_season("CHALLENGER", "I", 99) == seed_from_rank("CHALLENGER", "I") - MAX_DECAY
 
 
-def test_historical_rank_unranked_returns_default():
-    from bot.services.elo import seed_from_historical_rank
-    assert seed_from_historical_rank(None) == DEFAULT_ELO
-    assert seed_from_historical_rank("MYTHIC") == DEFAULT_ELO
+def test_past_season_floors_at_iron():
+    """Decay can't drop a seed below IRON's value (800)."""
+    from bot.services.elo import seed_from_past_season, TIER_SEED
+    # Iron IV, many seasons ago -> stays at 800.
+    assert seed_from_past_season("IRON", "IV", 10) == TIER_SEED["IRON"]
+    # Bronze with full decay would go below Iron; clamp to Iron.
+    assert seed_from_past_season("BRONZE", "IV", 99) == TIER_SEED["IRON"]
 
 
-def test_historical_rank_case_insensitive():
-    from bot.services.elo import seed_from_historical_rank
-    assert seed_from_historical_rank("DIAMOND") == seed_from_historical_rank("diamond")
+def test_past_season_unranked_returns_default():
+    from bot.services.elo import seed_from_past_season
+    assert seed_from_past_season(None, None, 0) == DEFAULT_ELO
+    assert seed_from_past_season("MYTHIC", "I", 0) == DEFAULT_ELO
+
+
+def test_past_season_case_insensitive():
+    from bot.services.elo import seed_from_past_season
+    assert seed_from_past_season("DIAMOND", "II", 1) == seed_from_past_season("diamond", "ii", 1)
 
 
 def test_parse_series_score_valid():

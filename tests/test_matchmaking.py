@@ -114,3 +114,16 @@ def test_top_matches_returns_empty_when_no_legal():
     players = [make_player(i, ["MID"]) for i in range(10)]  # nobody supports
     proposals = make_top_matches(players, n=3)
     assert proposals == []
+
+
+def test_matchmaker_output_roundtrips_as_roster_block():
+    """/roster-template path: matchmaker teams -> copy/paste block -> parses back."""
+    from bot.cogs.admin import format_roster_block, parse_manual_match
+    players = []
+    for team in range(2):
+        for i, role in enumerate(["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]):
+            players.append(make_player(team * 5 + i, [role]))
+    proposal = make_match(players)
+    assert proposal is not None
+    t1, t2 = proposal.team1.by_role, proposal.team2.by_role
+    assert parse_manual_match(format_roster_block(t1, t2)) == (t1, t2)

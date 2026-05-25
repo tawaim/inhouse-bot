@@ -22,7 +22,8 @@ from sqlalchemy import select
 from bot.config import Config, ROLES
 from bot.db.models import MatchPerformance, Player, Rating
 from bot.db.session import get_session
-from bot.services.elo import INHOUSE_ROLE, seed_from_historical_rank, seed_from_rank
+from bot.services.elo import INHOUSE_ROLE, seed_from_past_season, seed_from_rank
+from bot.services.opgg_client import OpggClient
 from bot.services.riot_client import RiotAccount, RiotAuthError, RiotClient
 
 log = logging.getLogger(__name__)
@@ -37,12 +38,13 @@ class LinkApprovalView(discord.ui.View):
     with placeholder values.
     """
 
-    def __init__(self, target_discord_id: int, riot_id_display: str, config: Config, riot: RiotClient, bot: commands.Bot):
+    def __init__(self, target_discord_id: int, riot_id_display: str, config: Config, riot: RiotClient, opgg: OpggClient, bot: commands.Bot):
         super().__init__(timeout=None)
         self.target_discord_id = target_discord_id
         self.riot_id_display = riot_id_display
         self.config = config
         self.riot = riot
+        self.opgg = opgg
         self.bot = bot
 
     async def _is_owner(self, interaction: discord.Interaction) -> bool:
@@ -95,15 +97,15 @@ class LinkApprovalView(discord.ui.View):
                 )
                 return
             puuid = player.riot_puuid
+            game_name = player.riot_game_name
+            tag_line = player.riot_tag_line
+            region = player.region
             if not puuid:
                 await interaction.followup.send("Internal error: pending player has no PUUID.", ephemeral=True)
                 return
 
         try:
             rank = await self.riot.get_solo_rank(puuid)
-            historical = None
-            if rank is None:
-                historical = await self.riot.get_historical_solo_rank(puuid)
             primary_role = await self.riot.infer_primary_role(puuid)
         except RiotAuthError:
             await interaction.followup.send(
@@ -111,6 +113,10 @@ class LinkApprovalView(discord.ui.View):
                 ephemeral=True,
             )
             return
+        # Unranked this split? Fall back to OP.GG's most recent past-season rank.
+        past = None
+        if rank is None:
+            past = await self.opgg.get_past_season_rank(game_name, tag_line, region)
 
         async with get_session() as db:
             player = await db.get(Player, target_id)
@@ -132,12 +138,12 @@ class LinkApprovalView(discord.ui.View):
             player.riot_last_synced = datetime.utcnow()
             player.link_status = "approved"
 
-            # Seed elo: prefer current rank, fall back to historical (with rust
-            # penalty), default to 1200 if neither is available.
+            # Seed elo: prefer current rank, fall back to OP.GG past-season rank
+            # (division-aware, with recency decay), default to 1200 if neither.
             if rank:
                 seed_elo = seed_from_rank(player.solo_tier, player.solo_rank)
-            elif historical:
-                seed_elo = seed_from_historical_rank(historical.tier)
+            elif past:
+                seed_elo = seed_from_past_season(past.tier, past.division, past.seasons_elapsed)
             else:
                 seed_elo = 1200
             player.last_synced_seed_elo = seed_elo
@@ -170,8 +176,12 @@ class LinkApprovalView(discord.ui.View):
             child.disabled = True
         if rank:
             rank_str = f"{rank.tier} {rank.rank} ({rank.league_points} LP)"
-        elif historical:
-            rank_str = f"Unranked this split — last season {historical.tier} (seeded -200 elo for rust)"
+        elif past:
+            ago = f"{past.seasons_elapsed} season(s) ago" if past.seasons_elapsed else "this past season"
+            rank_str = (
+                f"Unranked this split — last ranked **{past.tier} {past.division}** "
+                f"({ago}); seeded at **{seed_elo}** after recency decay"
+            )
         else:
             rank_str = "Unranked (seeded at default 1200)"
         embed = interaction.message.embeds[0] if interaction.message.embeds else discord.Embed()
@@ -272,15 +282,16 @@ async def _notify_user(bot: commands.Bot, user_id: int, guild_id: int, message: 
 
 
 class LinkingCog(commands.Cog):
-    def __init__(self, bot: commands.Bot, config: Config, riot: RiotClient):
+    def __init__(self, bot: commands.Bot, config: Config, riot: RiotClient, opgg: OpggClient):
         self.bot = bot
         self.config = config
         self.riot = riot
+        self.opgg = opgg
 
     async def cog_load(self) -> None:
         """Re-register the persistent view so buttons on old messages work after restart."""
         # Discord matches buttons by custom_id; the placeholder args are never read at click time.
-        self.bot.add_view(LinkApprovalView(0, "", self.config, self.riot, self.bot))
+        self.bot.add_view(LinkApprovalView(0, "", self.config, self.riot, self.opgg, self.bot))
 
     async def _is_admin(self, interaction: discord.Interaction) -> bool:
         if not isinstance(interaction.user, discord.Member):
@@ -372,7 +383,7 @@ class LinkingCog(commands.Cog):
         )
         embed.set_footer(text=f"Discord ID: {interaction.user.id} · PUUID: {account.puuid[:16]}…")
         view = LinkApprovalView(
-            interaction.user.id, riot_id_display, self.config, self.riot, self.bot
+            interaction.user.id, riot_id_display, self.config, self.riot, self.opgg, self.bot
         )
 
         # DM the owner. If we can't reach them, roll back the pending row and
@@ -448,13 +459,15 @@ class LinkingCog(commands.Cog):
 
         try:
             rank = await self.riot.get_solo_rank(account.puuid)
-            historical = None
-            if rank is None:
-                historical = await self.riot.get_historical_solo_rank(account.puuid)
             primary_role = await self.riot.infer_primary_role(account.puuid)
         except RiotAuthError:
             await interaction.followup.send("Riot API rejected our key.", ephemeral=True)
             return
+        past = None
+        if rank is None:
+            past = await self.opgg.get_past_season_rank(
+                account.game_name, account.tag_line, self.config.riot_region
+            )
 
         async with get_session() as db:
             player = await db.get(Player, member.id)
@@ -478,8 +491,8 @@ class LinkingCog(commands.Cog):
 
             if rank:
                 seed_elo = seed_from_rank(player.solo_tier, player.solo_rank)
-            elif historical:
-                seed_elo = seed_from_historical_rank(historical.tier)
+            elif past:
+                seed_elo = seed_from_past_season(past.tier, past.division, past.seasons_elapsed)
             else:
                 seed_elo = 1200
             player.last_synced_seed_elo = seed_elo
@@ -501,7 +514,12 @@ class LinkingCog(commands.Cog):
             player.previous_riot_puuid = None
             await db.commit()
 
-        rank_str = f"{rank.tier} {rank.rank} ({rank.league_points} LP)" if rank else "Unranked"
+        if rank:
+            rank_str = f"{rank.tier} {rank.rank} ({rank.league_points} LP)"
+        elif past:
+            rank_str = f"Unranked (last ranked {past.tier} {past.division} → seeded {seed_elo})"
+        else:
+            rank_str = "Unranked (seeded 1200)"
         await interaction.followup.send(
             f"✅ Linked {member.mention} → **{account.game_name}#{account.tag_line}** · "
             f"Solo Q: **{rank_str}** · Main: **{primary_role or 'unknown'}**",
