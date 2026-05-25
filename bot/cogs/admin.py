@@ -249,7 +249,7 @@ class ManualMatchModal(discord.ui.Modal, title="Manual Match Entry"):
                 verb = "created"
 
             session = await db.get(InhouseSession, match.session_id) if match.session_id else None
-            if session and session.status == "recruiting":
+            if session and session.status in ("recruiting", "closed"):
                 session.status = "matched"
             await db.commit()
             await db.refresh(match)
@@ -1225,10 +1225,10 @@ class AdminCog(commands.Cog):
                     )
                     return
             else:
-                # Fallback: soonest active session (recruiting or matched)
+                # Fallback: soonest active session (recruiting, closed, or matched)
                 session = (await db.execute(
                     select(InhouseSession)
-                    .where(InhouseSession.status.in_(["recruiting", "matched"]))
+                    .where(InhouseSession.status.in_(["recruiting", "closed", "matched"]))
                     .order_by(InhouseSession.game_date.asc())
                 )).scalars().first()
                 if session is None:

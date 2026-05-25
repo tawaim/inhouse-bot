@@ -454,7 +454,7 @@ def _build_public_embed(
 
     close_line = (
         f"**Signups close:** {signups_close.strftime('%a %b %d, %I:%M %p %Z')}"
-        if signups_close else "**Signups close:** Monday 9:30 PM ET"
+        if signups_close else "**Signups stay open until an admin closes them.**"
     )
 
     embed = discord.Embed(
@@ -510,14 +510,21 @@ class RecruitmentCog(commands.Cog):
     # ---------- Public API used by scheduler ----------
 
     async def post_recruitment(
-        self, game_date: date, channel: Optional[discord.TextChannel] = None
+        self,
+        game_date: date,
+        channel: Optional[discord.TextChannel] = None,
+        open_ended: bool = False,
     ) -> InhouseSession:
         """Post the recruitment for a Thursday. If channel is None, uses the
-        configured recruit channel."""
-        monday_before = game_date - timedelta(days=3)
-        signups_close_local = self.tz.localize(
-            datetime.combine(monday_before, datetime.min.time()).replace(hour=21, minute=30)
-        )
+        configured recruit channel. If open_ended, signups have no scheduled
+        close (signups_close_at=NULL) and only close via /close-signups."""
+        if open_ended:
+            signups_close_local = None
+        else:
+            monday_before = game_date - timedelta(days=3)
+            signups_close_local = self.tz.localize(
+                datetime.combine(monday_before, datetime.min.time()).replace(hour=21, minute=30)
+            )
 
         if channel is None:
             channel = await self._get_recruit_channel()
@@ -763,12 +770,14 @@ class RecruitmentCog(commands.Cog):
     @app_commands.describe(
         game_date="Game date in YYYY-MM-DD format (must be a Thursday)",
         channel="Where to post (defaults to the configured recruit channel, then this channel).",
+        open_ended="If true, signups stay open until you run /close-signups (no Monday auto-close).",
     )
     async def recruit_now(
         self,
         interaction: discord.Interaction,
         game_date: str,
         channel: Optional[discord.TextChannel] = None,
+        open_ended: bool = False,
     ):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("League Admin only.", ephemeral=True)
@@ -788,14 +797,19 @@ class RecruitmentCog(commands.Cog):
         if target is None and isinstance(interaction.channel, discord.TextChannel):
             target = interaction.channel
         try:
-            session = await self.post_recruitment(d, channel=target)
+            session = await self.post_recruitment(d, channel=target, open_ended=open_ended)
         except Exception as e:
             await interaction.followup.send(f"Failed: {e}", ephemeral=True)
             return
         posted_in = self.bot.get_channel(session.recruit_channel_id)
         where = posted_in.mention if isinstance(posted_in, discord.TextChannel) else "the recruit channel"
+        close_note = (
+            " Signups stay open until you run `/close-signups`."
+            if open_ended else " Signups auto-close Monday 9:30 PM ET."
+        )
         await interaction.followup.send(
-            f"Posted recruitment for {d} in {where} (Session #{session.id}).", ephemeral=True
+            f"Posted recruitment for {d} in {where} (Session #{session.id}).{close_note}",
+            ephemeral=True,
         )
 
     @app_commands.command(name="match-preview", description="(admin) Show what teams would be generated right now.")
@@ -1036,7 +1050,7 @@ class RecruitmentCog(commands.Cog):
                     return
             else:
                 session = (await db.execute(
-                    select(InhouseSession).where(InhouseSession.status.in_(["recruiting", "matched"]))
+                    select(InhouseSession).where(InhouseSession.status.in_(["recruiting", "closed", "matched"]))
                     .order_by(InhouseSession.game_date.asc())
                 )).scalars().first()
                 if session is None:
@@ -1110,6 +1124,74 @@ class RecruitmentCog(commands.Cog):
         await interaction.followup.send(
             f"✅ Removed {user.mention} from Session #{sid}.",
             ephemeral=True, allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @app_commands.command(
+        name="close-signups",
+        description="(admin) Close signups for one recruitment (locks RSVPs).",
+    )
+    @app_commands.describe(
+        session_id="Session ID to close (from the recruitment footer). Required if more than one is open."
+    )
+    async def close_signups(self, interaction: discord.Interaction, session_id: Optional[int] = None):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        async with get_session() as db:
+            if session_id is not None:
+                session = await db.get(InhouseSession, session_id)
+                if session is None:
+                    await interaction.followup.send(f"Session #{session_id} not found.", ephemeral=True)
+                    return
+                if session.status != "recruiting":
+                    await interaction.followup.send(
+                        f"Session #{session.id} signups aren't open (status: {session.status}).",
+                        ephemeral=True,
+                    )
+                    return
+            else:
+                # No id given: only act if exactly one recruitment is open, otherwise
+                # refuse and list them — never close more than the one you mean.
+                open_sessions = (await db.execute(
+                    select(InhouseSession).where(InhouseSession.status == "recruiting")
+                    .order_by(InhouseSession.game_date.asc())
+                )).scalars().all()
+                if not open_sessions:
+                    await interaction.followup.send("No open recruiting sessions.", ephemeral=True)
+                    return
+                if len(open_sessions) > 1:
+                    listing = "\n".join(
+                        f"• Session #{s.id} — {s.game_date.strftime('%a %b %d')}" for s in open_sessions
+                    )
+                    await interaction.followup.send(
+                        "Multiple recruitments are open — specify which with `session_id:`\n" + listing,
+                        ephemeral=True,
+                    )
+                    return
+                session = open_sessions[0]
+
+            playing_count = len((await db.execute(
+                select(Signup).where(Signup.session_id == session.id, Signup.status == "playing")
+            )).scalars().all())
+            session.status = "closed"
+            sid, game_date, channel_id = session.id, session.game_date, session.recruit_channel_id
+            await db.commit()
+
+        if channel_id:
+            ch = self.bot.get_channel(channel_id)
+            if ch is not None:
+                try:
+                    await ch.send(
+                        f"🔒 Signups closed for **{game_date.strftime('%a %b %d')}** "
+                        f"(Session #{sid}) — {playing_count} playing."
+                    )
+                except discord.HTTPException:
+                    log.exception("Failed to post close-signups notice")
+        await interaction.followup.send(
+            f"✅ Closed signups for Session #{sid} ({playing_count} playing). "
+            f"Set teams with `/manual-match session_id:{sid}`.",
+            ephemeral=True,
         )
 
     # ---------- Helpers ----------

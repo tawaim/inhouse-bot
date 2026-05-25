@@ -63,10 +63,13 @@ def setup_scheduler(bot: discord.Client, config: Config) -> AsyncIOScheduler:
             stmt = select(InhouseSession).where(
                 InhouseSession.game_date == this_thursday,
                 InhouseSession.status == "recruiting",
+                # Open-ended sessions (no scheduled close) are closed only via
+                # /close-signups, so the Monday auto-close skips them.
+                InhouseSession.signups_close_at.is_not(None),
             )
             session = (await db.execute(stmt)).scalar_one_or_none()
         if session is None:
-            log.info("No active recruiting session for %s; nothing to close", this_thursday)
+            log.info("No auto-closing recruiting session for %s; nothing to close", this_thursday)
             return
         try:
             await cog.close_signups_and_match(session.id)

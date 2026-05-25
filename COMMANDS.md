@@ -70,18 +70,27 @@ Shows a player's match-by-match inhouse elo history (defaults to you). Each line
 
 ## Recruitment commands
 
-### `/recruit-now <game_date> [channel]` (admin)
+### `/recruit-now <game_date> [channel] [open_ended]` (admin)
 
 Manually post a recruitment for a specific Thursday. Useful for testing or filling in if the scheduler missed a Friday.
 
 **Arguments:**
 - `game_date` — The Thursday in YYYY-MM-DD format (must be a Thursday)
 - `channel` *(optional)* — where to post
+- `open_ended` *(optional, default false)* — if true, signups stay open **indefinitely** until you run `/close-signups`; the Monday auto-close skips it. Use this while you're gathering elo data and closing/drafting by hand.
 
 **Behavior:**
 - Posts to the `channel` you pass, else the configured `recruit` channel (`/set-channel recruit`), else the channel you ran the command in.
 - Adds the three RSVP buttons: 🎮 Playing, ❌ Not Playing, 📺 Commentator
-- The recruitment embed footer shows `Session #N` — use that id with `/signups`, `/manual-match`, `/report-manual`, etc.
+- The recruitment embed footer shows `Session #N` — use that id with `/signups`, `/close-signups`, `/manual-match`, `/report-manual`, etc.
+
+### `/close-signups [session_id]` (admin)
+
+Closes signups for **one specific** recruitment — locks the RSVP buttons (status → `closed`) and posts a notice with the playing count. Then draft teams with `/manual-match session_id:<N>`.
+
+- Pass `session_id` to close that exact recruitment.
+- With no id: closes the open one if there's exactly one; if several are open, it **refuses and lists them** so you pick the right one (it never closes more than the one you mean).
+- Mainly for `open_ended` recruitments, but also works to close a scheduled one early.
 
 ### `/match-preview` (admin)
 
