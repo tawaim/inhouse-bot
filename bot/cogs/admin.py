@@ -1435,3 +1435,93 @@ class AdminCog(commands.Cog):
             chunk = f"{chunk}\n{line}" if chunk else line
         if chunk:
             await interaction.followup.send(chunk, ephemeral=True)
+
+    @app_commands.command(
+        name="match-elos",
+        description="(admin) Show each team's INHOUSE elo for a match (what they were entering it).",
+    )
+    @app_commands.describe(match_id="Match ID (from /matches or the teams post).")
+    async def match_elos(self, interaction: discord.Interaction, match_id: int):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        async with get_session() as db:
+            match = await db.get(Match, match_id)
+            if match is None:
+                await interaction.followup.send(f"Match {match_id} not found.", ephemeral=True)
+                return
+            team1 = {k: int(v) for k, v in json.loads(match.team1_json).items()}
+            team2 = {k: int(v) for k, v in json.loads(match.team2_json).items()}
+            ids = list(team1.values()) + list(team2.values())
+            inhouse = {
+                r.discord_id: r for r in (await db.execute(
+                    select(Rating).where(Rating.role == INHOUSE_ROLE, Rating.discord_id.in_(ids))
+                )).scalars().all()
+            }
+            players = {
+                p.discord_id: p for p in (await db.execute(
+                    select(Player).where(Player.discord_id.in_(ids))
+                )).scalars().all()
+            }
+            perfs = {
+                p.discord_id: p for p in (await db.execute(
+                    select(MatchPerformance).where(MatchPerformance.match_id == match_id)
+                )).scalars().all()
+            }
+            # INHOUSE deltas these players earned in matches reported AFTER this one,
+            # so we can subtract back to their elo *entering* this match.
+            later: dict[int, int] = {}
+            if match.reported_at is not None:
+                rows = (await db.execute(
+                    select(MatchPerformance.discord_id, MatchPerformance.inhouse_elo_delta)
+                    .join(Match, Match.id == MatchPerformance.match_id)
+                    .where(
+                        MatchPerformance.discord_id.in_(ids),
+                        Match.reported_at > match.reported_at,
+                    )
+                )).all()
+                for did, d in rows:
+                    later[did] = later.get(did, 0) + (d or 0)
+
+        reported = match.winner is not None
+
+        def who(did: int) -> str:
+            p = players.get(did)
+            return p.riot_game_name if p and p.riot_game_name else f"<@{did}>"
+
+        def entering_elo(did: int) -> int:
+            cur = inhouse[did].elo if did in inhouse else DEFAULT_ELO
+            if not reported:
+                return cur
+            this_delta = perfs[did].inhouse_elo_delta if did in perfs else 0
+            return cur - (this_delta or 0) - later.get(did, 0)
+
+        def team_block(team: dict[str, int]) -> tuple[int, list[str]]:
+            roles = [r for r in ROLES if r in team]
+            lines, total = [], 0
+            for r in roles:
+                did = team[r]
+                e = entering_elo(did)
+                total += e
+                dtxt = f"  ({perfs[did].inhouse_elo_delta:+d})" if (reported and did in perfs) else ""
+                lines.append(f"`{e:>4}` {r:<7} {who(did)}{dtxt}")
+            avg = round(total / len(roles)) if roles else DEFAULT_ELO
+            return avg, lines
+
+        a1, l1 = team_block(team1)
+        a2, l2 = team_block(team2)
+        label = "INHOUSE elo entering the match" if reported else "current INHOUSE elo (not yet reported)"
+        head = f"📊 **Match {match_id}** — {label}"
+        if reported:
+            head += f" · result {match.team1_wins}-{match.team2_wins}"
+        body = (
+            f"{head}\n\n🔵 **Team 1** — avg **{a1}**\n" + "\n".join(l1)
+            + f"\n\n🔴 **Team 2** — avg **{a2}**\n" + "\n".join(l2)
+            + f"\n\nTeam elo gap: **{abs(a1 - a2)}**"
+        )
+        if reported and any(did in perfs for did in ids):
+            body += "\n_( ± = what this match applied to each player. )_"
+        await interaction.followup.send(
+            body, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+        )
