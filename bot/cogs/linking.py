@@ -146,6 +146,9 @@ class LinkApprovalView(discord.ui.View):
                 seed_elo = seed_from_past_season(past.tier, past.division, past.seasons_elapsed)
             else:
                 seed_elo = 1200
+            # Only re-seed an existing base_seed from real rank/past data, never
+            # from the 1200 default (mirrors _refresh_all_base_seeds).
+            seed_from_data = bool(rank or past)
             player.last_synced_seed_elo = seed_elo
 
             for role in [*ROLES, INHOUSE_ROLE]:
@@ -161,12 +164,13 @@ class LinkApprovalView(discord.ui.View):
                         inhouse_modifier=0,
                         games_played=0,
                     ))
-                elif account_changed:
-                    # Different account — update base_seed only, keep modifier
-                    # and games_played intact. Recompute displayed elo.
+                elif seed_from_data or account_changed:
+                    # Re-seed base_seed on any re-link with real rank/past data
+                    # (not just an account swap), keeping modifier and
+                    # games_played intact. Recompute displayed elo.
                     existing.base_seed = seed_elo
                     existing.elo = existing.base_seed + existing.inhouse_modifier
-                # else: same account being re-linked, keep everything as-is
+                # else: same account, no rank data — keep everything as-is
 
             # Now that we've used previous_riot_puuid, clear it
             player.previous_riot_puuid = None
@@ -495,6 +499,11 @@ class LinkingCog(commands.Cog):
                 seed_elo = seed_from_past_season(past.tier, past.division, past.seasons_elapsed)
             else:
                 seed_elo = 1200
+            # Did the seed come from real rank/past data, or just the 1200 default?
+            # Only real data should overwrite an existing base_seed (mirrors
+            # _refresh_all_base_seeds), so a transient "no rank found" never
+            # clobbers a good seed.
+            seed_from_data = bool(rank or past)
             player.last_synced_seed_elo = seed_elo
 
             for role in [*ROLES, INHOUSE_ROLE]:
@@ -508,7 +517,9 @@ class LinkingCog(commands.Cog):
                         inhouse_modifier=0,
                         games_played=0,
                     ))
-                elif account_changed:
+                elif seed_from_data or account_changed:
+                    # Re-seed from current rank/past on any re-link (not just an
+                    # account swap), preserving the inhouse_modifier (W/L).
                     existing_rating.base_seed = seed_elo
                     existing_rating.elo = existing_rating.base_seed + existing_rating.inhouse_modifier
             player.previous_riot_puuid = None
