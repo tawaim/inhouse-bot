@@ -154,11 +154,27 @@ def update_elo_series(
     return player_elo + delta, delta
 
 
-# A player's elo change is driven by the TEAM-vs-TEAM matchup (so teammates move
-# by nearly the same amount), plus a small capped bias for how their own rating
-# compares to their direct lane opponent's. The cap keeps teammates within ~10.
-LANE_BIAS_K = 10     # mini-elo weight applied to the lane (role) matchup
-LANE_BIAS_CAP = 5    # max elo the lane matchup can shift on top of the team result
+# ---------- Team-based series scoring ----------
+# A player's points come from the TEAM-vs-TEAM series result, so teammates move
+# together. Each result has a FIXED base (the "compact middle" — balanced games
+# cluster here), then a rating-gap adjustment widens the extremes: winning as the
+# rating underdog pays more and winning as the favorite pays less (the "peaks"),
+# but a win is NEVER negative and a loss is NEVER positive. Finally a small, capped
+# lane term spreads teammates apart by relative lane difficulty (within ~10).
+WIN_BASE_SWEEP = 20    # points for a 2-0 (sweep) vs an evenly-rated team
+WIN_BASE_NARROW = 10   # points for a 2-1 (narrow win) vs an evenly-rated team
+# In-house lobbies are matched close (teams usually within ~200 rating), so the
+# gap constants are calibrated to treat a 200-point gap as the favorite/underdog
+# extreme — that's where the curve reaches its peaks, filling the realistic band.
+UPSET_K = 42           # extra reward for winning as the rating underdog (and extra
+                       # penalty for losing as the favorite) — drives the peaks
+FAVORED_K = 23         # how much a rating favorite's gain is shaved (and a rating
+                       # underdog's loss is softened)
+WIN_FLOOR = 2          # a series win always nets at least this many points
+LOSS_FLOOR = 2         # a series loss always costs at least this many points
+
+LANE_BIAS_K = 10     # weight on relative lane difficulty (your lane vs the team matchup)
+LANE_BIAS_CAP = 5    # max points the lane term can shift a single player
 
 
 def update_elo_team_series(
@@ -168,27 +184,63 @@ def update_elo_team_series(
     lane_opponent_elo: int,
     player_team_wins: int,
     opponent_team_wins: int,
-    games_played: int,
+    games_played: int = 0,  # accepted for call-site compatibility; intentionally
+                            # unused — the team-series model uses fixed bases, not K
 ) -> tuple[int, int]:
-    """Team-based series elo with a small lane-matchup bias.
+    """Points for one player from a team-vs-team SERIES result.
 
-    Bulk of the change is TEAM vs TEAM: K * (actual - expected(team_avg, opp_avg)),
-    identical for everyone on a team. A small, capped term (±LANE_BIAS_CAP) nudges
-    each player by how their own rating compares to their direct lane opponent, so
-    holding a tough lane is rewarded a little. Net effect: teammates land within
-    ~10 elo of each other instead of swinging wildly by individual rating.
+    Shape (winning team, even lanes; the losing team mirrors as negatives).
+    Calibrated for an in-house lobby where teams are matched within ~200 rating,
+    so a 200-point gap is the favorite/underdog extreme::
 
-    Returns (new_elo, delta).
+        team gap      2-0    2-1
+        +200 (fav)    +14    +4
+        +100          +17    +7
+        even          +20    +10
+        -100          +26    +16
+        -200 (dog)    +31    +21
+
+    - Result base: a sweep (2-0) is worth WIN_BASE_SWEEP, a narrow win (2-1)
+      WIN_BASE_NARROW. This is the compact middle where balanced games cluster.
+    - Rating adjustment: off the TEAM-vs-TEAM expected score, UPSET_K rewards the
+      rating underdog and FAVORED_K shaves the favorite. Losses mirror: a favorite
+      that loses (a choke) is docked extra, an underdog that loses is docked less.
+    - A win never goes negative and a loss never goes positive (WIN_FLOOR /
+      LOSS_FLOOR), no matter how lopsided the matchup.
+    - Lane term: a small, capped nudge by how much HARDER your lane was than the
+      overall team matchup — pure relative lane difficulty, so teammates stay
+      within ~2*LANE_BIAS_CAP of each other.
+
+    Returns (new_elo, delta) where delta is the signed change.
     """
     total = player_team_wins + opponent_team_wins
     if total == 0:
         return player_elo, 0
-    actual = player_team_wins / total
-    k = k_factor(games_played)
-    team_term = k * (actual - expected_score(team_avg, opp_team_avg))
-    lane_term = LANE_BIAS_K * (actual - expected_score(player_elo, lane_opponent_elo))
+    won = player_team_wins > opponent_team_wins
+    sweep = min(player_team_wins, opponent_team_wins) == 0
+
+    e_team = expected_score(team_avg, opp_team_avg)
+    favored = e_team - 0.5  # >0 = this team was the rating favorite, <0 = underdog
+    base = WIN_BASE_SWEEP if sweep else WIN_BASE_NARROW
+    if won:
+        team_delta = base + UPSET_K * max(0.0, -favored) - FAVORED_K * max(0.0, favored)
+    else:
+        # mirror image: the favorite that loses (a choke) is docked extra; the
+        # underdog that loses is docked less.
+        team_delta = -(base + UPSET_K * max(0.0, favored) - FAVORED_K * max(0.0, -favored))
+
+    # Relative lane difficulty: a harder lane than the team matchup -> small bonus,
+    # an easier lane -> small penalty. Centred on the team result so even lanes add 0.
+    e_lane = expected_score(player_elo, lane_opponent_elo)
+    lane_term = LANE_BIAS_K * (e_team - e_lane)
     lane_term = max(-LANE_BIAS_CAP, min(LANE_BIAS_CAP, lane_term))
-    delta = round(team_term + lane_term)
+
+    delta = team_delta + lane_term
+    if won:
+        delta = max(delta, float(WIN_FLOOR))     # a win never costs points
+    else:
+        delta = min(delta, float(-LOSS_FLOOR))   # a loss never gains points
+    delta = round(delta)
     return player_elo + delta, delta
 
 

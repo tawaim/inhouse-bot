@@ -202,12 +202,63 @@ def test_series_2_1_equal_peers():
 
 # ---------- team-based series elo (team-vs-team + small lane bias) ----------
 
-def test_team_series_balanced_sweep_magnitude():
-    """Balanced teams, 2-0, even lane: team base (K/2 = 25) + capped lane bias."""
+def test_team_series_balanced_curve_even():
+    """Balanced teams, even lanes -> hit the fixed result base exactly:
+    2-0 = WIN_BASE_SWEEP (+20), 2-1 = WIN_BASE_NARROW (+10)."""
+    from bot.services.elo import update_elo_team_series, WIN_BASE_SWEEP, WIN_BASE_NARROW
+    _, sweep = update_elo_team_series(1500, 1500, player_elo=1500, lane_opponent_elo=1500,
+                                      player_team_wins=2, opponent_team_wins=0)
+    _, narrow = update_elo_team_series(1500, 1500, player_elo=1500, lane_opponent_elo=1500,
+                                       player_team_wins=2, opponent_team_wins=1)
+    assert sweep == WIN_BASE_SWEEP == 20
+    assert narrow == WIN_BASE_NARROW == 10
+
+
+def test_team_series_favorite_at_200_gap():
+    """A 200-rating favorite (the realistic extreme) gets the shaved peak value:
+    2-0 ~ +14, 2-1 ~ +4 — and a win is NEVER negative. Lane mirrors team (~0)."""
     from bot.services.elo import update_elo_team_series
-    _, d = update_elo_team_series(1500, 1500, player_elo=1500, lane_opponent_elo=1500,
-                                  player_team_wins=2, opponent_team_wins=0, games_played=20)
-    assert 24 <= d <= 31
+    _, sweep = update_elo_team_series(1500, 1300, player_elo=1500, lane_opponent_elo=1300,
+                                      player_team_wins=2, opponent_team_wins=0)
+    _, narrow = update_elo_team_series(1500, 1300, player_elo=1500, lane_opponent_elo=1300,
+                                       player_team_wins=2, opponent_team_wins=1)
+    assert sweep == 14
+    assert narrow == 4
+
+
+def test_team_series_underdog_at_200_gap():
+    """A 200-rating underdog (the realistic extreme) hits the peak: 2-0 ~ +31,
+    2-1 ~ +21."""
+    from bot.services.elo import update_elo_team_series
+    _, sweep = update_elo_team_series(1300, 1500, player_elo=1300, lane_opponent_elo=1500,
+                                      player_team_wins=2, opponent_team_wins=0)
+    _, narrow = update_elo_team_series(1300, 1500, player_elo=1300, lane_opponent_elo=1500,
+                                       player_team_wins=2, opponent_team_wins=1)
+    assert sweep == 31
+    assert narrow == 21
+
+
+def test_team_series_win_never_negative_extreme():
+    """The whole point of the fix: a crushing favorite that only squeaks a 2-1 win
+    (and even dominates its lane) still nets a positive delta, not a loss."""
+    from bot.services.elo import update_elo_team_series, WIN_FLOOR
+    _, d = update_elo_team_series(2400, 800, player_elo=2400, lane_opponent_elo=800,
+                                  player_team_wins=2, opponent_team_wins=1)
+    assert d >= WIN_FLOOR
+    assert d > 0
+
+
+def test_team_series_loss_mirrors_and_never_positive():
+    """Losses mirror wins: a favorite that loses (choke) is docked more than an
+    underdog that loses, and a loss is never positive."""
+    from bot.services.elo import update_elo_team_series
+    _, choke = update_elo_team_series(1500, 1300, player_elo=1500, lane_opponent_elo=1300,
+                                      player_team_wins=0, opponent_team_wins=2)
+    _, underdog_loss = update_elo_team_series(1300, 1500, player_elo=1300, lane_opponent_elo=1500,
+                                              player_team_wins=0, opponent_team_wins=2)
+    assert choke < underdog_loss < 0
+    assert choke == -31          # the favorite's choke (200 gap), mirrors the +31 win
+    assert underdog_loss == -14  # softened for the underdog, mirrors the favorite's +14
 
 
 def test_team_series_teammates_within_10():
