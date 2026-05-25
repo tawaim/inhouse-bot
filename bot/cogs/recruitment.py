@@ -540,7 +540,11 @@ class RecruitmentCog(commands.Cog):
             session = InhouseSession(
                 game_date=game_date,
                 recruit_posted_at=datetime.utcnow(),
-                signups_close_at=signups_close_local.astimezone(pytz.UTC).replace(tzinfo=None),
+                # None for open-ended signups (no scheduled close).
+                signups_close_at=(
+                    signups_close_local.astimezone(pytz.UTC).replace(tzinfo=None)
+                    if signups_close_local is not None else None
+                ),
                 recruit_channel_id=channel.id,
                 status="recruiting",
             )
