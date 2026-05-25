@@ -44,12 +44,16 @@ from bot.cogs.admin import format_roster_block
 log = logging.getLogger(__name__)
 
 
-def upcoming_recruit_thursdays(today: date, horizon_days: int = 13) -> list[date]:
-    """Thursdays within `horizon_days` of `today` whose recruitment window has
-    opened (recruitment posts 13 days ahead, so at any moment the next ~2
-    Thursdays should already be open). Used to self-heal missed auto-posts."""
+def upcoming_recruit_thursdays(
+    today: date, horizon_days: int = 13, min_lead_days: int = 4
+) -> list[date]:
+    """Thursdays whose recruitment window is still meaningfully open: at least
+    `min_lead_days` out (signups close the Monday 3 days before, so a Thursday
+    only 0-3 days away has no real window left) and within `horizon_days`. Used to
+    self-heal missed auto-posts without clobbering an imminent Thursday an admin
+    may want to post manually / open-ended."""
     out = []
-    for ahead in range(horizon_days + 1):
+    for ahead in range(min_lead_days, horizon_days + 1):
         d = today + timedelta(days=ahead)
         if d.weekday() == 3:  # Thursday
             out.append(d)

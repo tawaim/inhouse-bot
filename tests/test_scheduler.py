@@ -33,17 +33,18 @@ def test_monday_close_finds_this_weeks_thursday():
     assert this_thursday == monday + timedelta(days=3)
 
 
-def test_upcoming_recruit_thursdays_returns_next_two():
-    """Self-heal reconciliation should target the next ~2 open Thursdays."""
+def test_upcoming_recruit_thursdays_skips_imminent():
+    """An imminent Thursday (<4 days out, no signup window left) is NOT auto-posted —
+    it's left for the admin to handle manually / open-ended."""
     from bot.cogs.recruitment import upcoming_recruit_thursdays
-    # From a Monday, the next two Thursdays fall within the 13-day window.
-    got = upcoming_recruit_thursdays(date(2026, 5, 25))
-    assert got == [date(2026, 5, 28), date(2026, 6, 4)]
+    got = upcoming_recruit_thursdays(date(2026, 5, 25))  # Monday
+    assert date(2026, 5, 28) not in got    # 3 days out — skipped
+    assert date(2026, 6, 4) in got         # 10 days out — auto-posted
     assert all(d.weekday() == 3 for d in got)
 
 
-def test_upcoming_recruit_thursdays_includes_today_if_thursday():
+def test_upcoming_recruit_thursdays_within_lead_and_horizon():
     from bot.cogs.recruitment import upcoming_recruit_thursdays
-    got = upcoming_recruit_thursdays(date(2026, 5, 28))  # a Thursday
-    assert got[0] == date(2026, 5, 28)
-    assert all(d.weekday() == 3 for d in got)
+    base = date(2026, 5, 25)
+    got = upcoming_recruit_thursdays(base)
+    assert all(4 <= (d - base).days <= 13 for d in got)
