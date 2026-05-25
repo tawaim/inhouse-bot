@@ -44,6 +44,18 @@ from bot.cogs.admin import format_roster_block
 log = logging.getLogger(__name__)
 
 
+def upcoming_recruit_thursdays(today: date, horizon_days: int = 13) -> list[date]:
+    """Thursdays within `horizon_days` of `today` whose recruitment window has
+    opened (recruitment posts 13 days ahead, so at any moment the next ~2
+    Thursdays should already be open). Used to self-heal missed auto-posts."""
+    out = []
+    for ahead in range(horizon_days + 1):
+        d = today + timedelta(days=ahead)
+        if d.weekday() == 3:  # Thursday
+            out.append(d)
+    return out
+
+
 # =============================================================================
 # Public RSVP buttons (Playing / Not Playing / Commentator)
 # =============================================================================
@@ -129,6 +141,14 @@ async def _resolve_session_from_message(message_id: int) -> Optional[InhouseSess
     async with get_session() as db:
         stmt = select(InhouseSession).where(InhouseSession.recruit_msg_id == message_id)
         return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def _is_linked_approved(discord_id: int) -> bool:
+    """True if the user has an approved Riot link — otherwise matchmaking would
+    seed them at the default 1200 rather than their real rank."""
+    async with get_session() as db:
+        p = await db.get(Player, discord_id)
+    return p is not None and p.riot_puuid is not None and p.link_status == "approved"
 
 
 # =============================================================================
@@ -229,11 +249,15 @@ class DoneButton(discord.ui.Button):
             await db.commit()
 
         nice_roles = ", ".join(view.selected)
+        warn = ""
+        if not await _is_linked_approved(view.user_id):
+            warn = ("\n⚠️ You don't have an approved Riot link yet — run `/link` before game day, "
+                    "or you'll be seeded at the default rating.")
         # Disable everything to make it clear it's saved
         for child in view.children:
             child.disabled = True
         await interaction.response.edit_message(
-            content=f"✅ Saved: **{nice_roles}**. You can click 🎮 Playing again to change.",
+            content=f"✅ Saved: **{nice_roles}**. You can click 🎮 Playing again to change.{warn}",
             view=view,
         )
         await _refresh_public_counts(interaction.client, view.session_id)
@@ -351,7 +375,7 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
             embed.add_field(name="🔵 Team 1 (Blue)", value=t1, inline=True)
             embed.add_field(name="🔴 Team 2 (Red)", value=t2, inline=True)
             embed.set_footer(
-                text=f"Match {match.id} (Option {label}) · "
+                text=f"Match {match.id} · Session #{session.id} (Option {label}) · "
                      f"Skill diff: {chosen['balance_diff']:.2f} · "
                      f"Game time: Thu 9:30 PM ET"
             )
@@ -394,7 +418,7 @@ async def _refresh_public_counts(bot: discord.Client, session_id: int) -> None:
         pytz.UTC.localize(session.signups_close_at).astimezone(tz)
         if session.signups_close_at else None
     )
-    embed = _build_public_embed(session.game_date, signups_close, buckets)
+    embed = _build_public_embed(session.game_date, signups_close, buckets, session_id=session.id)
     await msg.edit(embed=embed)
 
 
@@ -422,6 +446,7 @@ def _build_public_embed(
     game_date: date,
     signups_close: Optional[datetime],
     buckets: dict[str, list[int]],
+    session_id: Optional[int] = None,
 ) -> discord.Embed:
     playing = buckets.get("playing", [])
     not_playing = buckets.get("not_playing", [])
@@ -455,10 +480,15 @@ def _build_public_embed(
         value=_format_user_list(commentator),
         inline=True,
     )
+    parts = []
+    if session_id is not None:
+        parts.append(f"Session #{session_id}")
     if len(playing) >= 10:
-        embed.set_footer(text="✅ Enough players to run a match")
+        parts.append("✅ Enough players to run a match")
     elif playing:
-        embed.set_footer(text=f"Need {10 - len(playing)} more to run a match")
+        parts.append(f"Need {10 - len(playing)} more to run a match")
+    if parts:
+        embed.set_footer(text=" · ".join(parts))
     return embed
 
 
@@ -494,23 +524,58 @@ class RecruitmentCog(commands.Cog):
         if channel is None:
             raise RuntimeError("No recruit channel configured. Use /set-channel recruit first.")
 
-        embed = _build_public_embed(game_date, signups_close_local, buckets={})
         view = RsvpView()
-        msg = await channel.send(embed=embed, view=view)
-
         async with get_session() as db:
             session = InhouseSession(
                 game_date=game_date,
                 recruit_posted_at=datetime.utcnow(),
                 signups_close_at=signups_close_local.astimezone(pytz.UTC).replace(tzinfo=None),
-                recruit_msg_id=msg.id,
                 recruit_channel_id=channel.id,
                 status="recruiting",
             )
             db.add(session)
+            await db.flush()  # assigns session.id before we build the embed/send
+            embed = _build_public_embed(
+                game_date, signups_close_local, buckets={}, session_id=session.id
+            )
+            msg = await channel.send(embed=embed, view=view)
+            session.recruit_msg_id = msg.id
             await db.commit()
             await db.refresh(session)
         return session
+
+    async def ensure_upcoming_recruitments(self) -> int:
+        """Self-heal: post recruitment for any upcoming Thursday whose window has
+        opened but has no session yet. Called on startup and by the Friday cron, so
+        a missed cron run (e.g. the machine was down at 9 AM Friday) is recovered on
+        the next boot instead of being silently skipped forever.
+
+        No-ops with a warning if no recruit channel is configured — we won't post to
+        an arbitrary fallback channel for an automated action. Returns count posted.
+        """
+        channel = await self._configured_recruit_channel()
+        if channel is None:
+            log.warning(
+                "No recruit channel configured — skipping auto-post. "
+                "Set one with /set-channel recruit."
+            )
+            return 0
+        today = datetime.now(self.tz).date()
+        posted = 0
+        for d in upcoming_recruit_thursdays(today):
+            async with get_session() as db:
+                exists = (await db.execute(
+                    select(InhouseSession).where(InhouseSession.game_date == d)
+                )).scalars().first()
+            if exists is not None:
+                continue
+            try:
+                await self.post_recruitment(d, channel=channel)
+                posted += 1
+                log.info("Auto-post: created recruitment for %s", d)
+            except Exception:
+                log.exception("Auto-post: failed to create recruitment for %s", d)
+        return posted
 
     async def close_signups_and_match(self, session_id: int) -> None:
         """Lock the session, refresh everyone's base_seed from current Riot rank,
@@ -593,8 +658,8 @@ class RecruitmentCog(commands.Cog):
 
             # Public placeholder
             await channel.send(
-                f"🔒 Signups closed for **{session.game_date.strftime('%a %b %d')}**. "
-                f"Teams being finalized — check back shortly."
+                f"🔒 Signups closed for **{session.game_date.strftime('%a %b %d')}** "
+                f"(Session #{session.id}). Teams being finalized — check back shortly."
             )
             if len(playing_signups) > 10:
                 bench = [s for s in playing_signups
@@ -695,8 +760,16 @@ class RecruitmentCog(commands.Cog):
     # ---------- Slash commands ----------
 
     @app_commands.command(name="recruit-now", description="(admin) Manually post a recruitment for a given Thursday.")
-    @app_commands.describe(game_date="Game date in YYYY-MM-DD format (must be a Thursday)")
-    async def recruit_now(self, interaction: discord.Interaction, game_date: str):
+    @app_commands.describe(
+        game_date="Game date in YYYY-MM-DD format (must be a Thursday)",
+        channel="Where to post (defaults to the configured recruit channel, then this channel).",
+    )
+    async def recruit_now(
+        self,
+        interaction: discord.Interaction,
+        game_date: str,
+        channel: Optional[discord.TextChannel] = None,
+    ):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("League Admin only.", ephemeral=True)
             return
@@ -709,14 +782,21 @@ class RecruitmentCog(commands.Cog):
             await interaction.response.send_message("Date must be a Thursday.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        # Post in the channel the command was run in
-        channel = interaction.channel if isinstance(interaction.channel, discord.TextChannel) else None
+        # Prefer an explicit channel, then the configured recruit channel
+        # (/set-channel recruit), then fall back to the current channel.
+        target = channel or await self._get_recruit_channel()
+        if target is None and isinstance(interaction.channel, discord.TextChannel):
+            target = interaction.channel
         try:
-            session = await self.post_recruitment(d, channel=channel)
+            session = await self.post_recruitment(d, channel=target)
         except Exception as e:
             await interaction.followup.send(f"Failed: {e}", ephemeral=True)
             return
-        await interaction.followup.send(f"Posted recruitment for {d} (session {session.id}).", ephemeral=True)
+        posted_in = self.bot.get_channel(session.recruit_channel_id)
+        where = posted_in.mention if isinstance(posted_in, discord.TextChannel) else "the recruit channel"
+        await interaction.followup.send(
+            f"Posted recruitment for {d} in {where} (Session #{session.id}).", ephemeral=True
+        )
 
     @app_commands.command(name="match-preview", description="(admin) Show what teams would be generated right now.")
     async def match_preview(self, interaction: discord.Interaction):
@@ -857,6 +937,181 @@ class RecruitmentCog(commands.Cog):
             content, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
         )
 
+    @app_commands.command(
+        name="signups",
+        description="(admin) Show who signed up and the role(s) they picked.",
+    )
+    @app_commands.describe(
+        session_id="Session ID (from the recruitment post footer). Defaults to the soonest active session."
+    )
+    async def signups(self, interaction: discord.Interaction, session_id: Optional[int] = None):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        async with get_session() as db:
+            if session_id is not None:
+                session = await db.get(InhouseSession, session_id)
+                if session is None:
+                    await interaction.followup.send(f"Session #{session_id} not found.", ephemeral=True)
+                    return
+            else:
+                session = (await db.execute(
+                    select(InhouseSession).where(InhouseSession.status == "recruiting")
+                    .order_by(InhouseSession.game_date.asc())
+                )).scalars().first()
+                if session is None:
+                    await interaction.followup.send(
+                        "No active recruiting session. Pass a `session_id` to view a specific one.",
+                        ephemeral=True,
+                    )
+                    return
+            sus = (await db.execute(
+                select(Signup).where(Signup.session_id == session.id)
+                .order_by(Signup.signed_up_at.asc())
+            )).scalars().all()
+            ids = [s.discord_id for s in sus]
+            approved_ids = set()
+            if ids:
+                approved_ids = {
+                    p.discord_id for p in (await db.execute(
+                        select(Player).where(Player.discord_id.in_(ids))
+                    )).scalars().all()
+                    if p.riot_puuid and p.link_status == "approved"
+                }
+
+        playing = [s for s in sus if s.status == "playing"]
+        not_playing = [s for s in sus if s.status == "not_playing"]
+        commentator = [s for s in sus if s.status == "commentator"]
+
+        lines = [
+            f"📋 Signups for **{session.game_date.strftime('%a %b %d')}** · "
+            f"Session #{session.id} ({session.status})",
+            "",
+            f"**🎮 Playing ({len(playing)})**",
+        ]
+        if playing:
+            for s in playing:
+                roles = ", ".join(s.role_list) if s.role_list else "—"
+                flag = "" if s.discord_id in approved_ids else "  ⚠️ not linked"
+                lines.append(f"• <@{s.discord_id}> — {roles}{flag}")
+        else:
+            lines.append("*nobody yet*")
+        lines.append("")
+        np = ", ".join(f"<@{s.discord_id}>" for s in not_playing) or "—"
+        co = ", ".join(f"<@{s.discord_id}>" for s in commentator) or "—"
+        lines.append(f"**❌ Not Playing ({len(not_playing)})**: {np}")
+        lines.append(f"**📺 Commentators ({len(commentator)})**: {co}")
+
+        # Ephemeral so the otherwise-private role picks aren't leaked publicly.
+        # Send in <=1900-char chunks, with mentions rendered but not pinging.
+        chunk = ""
+        for line in lines:
+            if len(chunk) + len(line) + 1 > 1900:
+                await interaction.followup.send(
+                    chunk, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+                )
+                chunk = ""
+            chunk = f"{chunk}\n{line}" if chunk else line
+        if chunk:
+            await interaction.followup.send(
+                chunk, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+            )
+
+    @app_commands.command(
+        name="cancel-session",
+        description="(admin) Cancel a recruiting/matched session.",
+    )
+    @app_commands.describe(session_id="Session ID to cancel. Defaults to the soonest active session.")
+    async def cancel_session(self, interaction: discord.Interaction, session_id: Optional[int] = None):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        async with get_session() as db:
+            if session_id is not None:
+                session = await db.get(InhouseSession, session_id)
+                if session is None:
+                    await interaction.followup.send(f"Session #{session_id} not found.", ephemeral=True)
+                    return
+            else:
+                session = (await db.execute(
+                    select(InhouseSession).where(InhouseSession.status.in_(["recruiting", "matched"]))
+                    .order_by(InhouseSession.game_date.asc())
+                )).scalars().first()
+                if session is None:
+                    await interaction.followup.send("No active session to cancel.", ephemeral=True)
+                    return
+            if session.status in ("completed", "cancelled"):
+                await interaction.followup.send(
+                    f"Session #{session.id} is already {session.status}.", ephemeral=True
+                )
+                return
+            prev = session.status
+            session.status = "cancelled"
+            sid, game_date, channel_id = session.id, session.game_date, session.recruit_channel_id
+            await db.commit()
+
+        if channel_id:
+            ch = self.bot.get_channel(channel_id)
+            if ch is not None:
+                try:
+                    await ch.send(
+                        f"❌ Inhouse for **{game_date.strftime('%a %b %d')}** "
+                        f"(Session #{sid}) has been cancelled."
+                    )
+                except discord.HTTPException:
+                    log.exception("Failed to post cancellation notice")
+        await interaction.followup.send(f"✅ Cancelled Session #{sid} (was {prev}).", ephemeral=True)
+
+    @app_commands.command(
+        name="remove-signup",
+        description="(admin) Remove a player's signup from a session.",
+    )
+    @app_commands.describe(
+        user="The player to remove",
+        session_id="Session ID. Defaults to the soonest recruiting session.",
+    )
+    async def remove_signup(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        session_id: Optional[int] = None,
+    ):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        async with get_session() as db:
+            if session_id is not None:
+                session = await db.get(InhouseSession, session_id)
+                if session is None:
+                    await interaction.followup.send(f"Session #{session_id} not found.", ephemeral=True)
+                    return
+            else:
+                session = (await db.execute(
+                    select(InhouseSession).where(InhouseSession.status == "recruiting")
+                    .order_by(InhouseSession.game_date.asc())
+                )).scalars().first()
+                if session is None:
+                    await interaction.followup.send("No active recruiting session.", ephemeral=True)
+                    return
+            su = await db.get(Signup, (session.id, user.id))
+            if su is None:
+                await interaction.followup.send(
+                    f"{user.display_name} isn't signed up for Session #{session.id}.", ephemeral=True
+                )
+                return
+            await db.delete(su)
+            await db.commit()
+            sid = session.id
+
+        await _refresh_public_counts(interaction.client, sid)
+        await interaction.followup.send(
+            f"✅ Removed {user.mention} from Session #{sid}.",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     # ---------- Helpers ----------
 
     async def _is_admin(self, interaction: discord.Interaction) -> bool:
@@ -876,6 +1131,17 @@ class RecruitmentCog(commands.Cog):
             return None
         for ch in guild.text_channels:
             if ch.permissions_for(guild.me).send_messages:
+                return ch
+        return None
+
+    async def _configured_recruit_channel(self) -> Optional[discord.TextChannel]:
+        """The explicitly-configured recruit channel only (no random fallback).
+        Auto-posts use this so they never post to an arbitrary channel."""
+        async with get_session() as db:
+            cfg = await db.get(GuildConfig, self.config.discord_guild_id)
+        if cfg and cfg.recruit_channel_id:
+            ch = self.bot.get_channel(cfg.recruit_channel_id)
+            if isinstance(ch, discord.TextChannel):
                 return ch
         return None
 

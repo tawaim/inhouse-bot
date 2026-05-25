@@ -43,10 +43,10 @@ def setup_scheduler(bot: discord.Client, config: Config) -> AsyncIOScheduler:
         if not isinstance(cog, RecruitmentCog):
             log.error("RecruitmentCog not loaded; skipping recruit job")
             return
-        target = next_thursday_after(datetime.now(tz).date(), days_ahead=13)
         try:
-            await cog.post_recruitment(target)
-            log.info("Posted recruitment for %s", target)
+            # Posts the newly-opened Thursday (and backfills any earlier missed one).
+            posted = await cog.ensure_upcoming_recruitments()
+            log.info("Friday recruit job posted %d recruitment(s)", posted)
         except Exception:
             log.exception("Failed to post recruitment")
 
@@ -74,12 +74,18 @@ def setup_scheduler(bot: discord.Client, config: Config) -> AsyncIOScheduler:
         except Exception:
             log.exception("Failed to close session %d", session.id)
 
+    # misfire_grace_time lets a run that's slightly late (busy loop, brief downtime)
+    # still fire instead of being dropped; coalesce collapses pile-ups into one run.
+    # (Hard catch-up across longer downtime is handled by the startup reconciliation
+    # in ensure_upcoming_recruitments — the in-memory job store has no run history.)
     # Friday 9:00 AM (Mon=0..Sun=6, Friday=4)
     scheduler.add_job(
         friday_recruit_job,
         CronTrigger(day_of_week="fri", hour=9, minute=0),
         id="friday_recruit",
         replace_existing=True,
+        misfire_grace_time=6 * 3600,
+        coalesce=True,
     )
     # Monday 9:30 PM
     scheduler.add_job(
@@ -87,6 +93,8 @@ def setup_scheduler(bot: discord.Client, config: Config) -> AsyncIOScheduler:
         CronTrigger(day_of_week="mon", hour=21, minute=30),
         id="monday_close",
         replace_existing=True,
+        misfire_grace_time=3 * 3600,
+        coalesce=True,
     )
 
     return scheduler

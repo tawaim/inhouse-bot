@@ -254,6 +254,7 @@ class ManualMatchModal(discord.ui.Modal, title="Manual Match Entry"):
             await db.commit()
             await db.refresh(match)
             match_id = match.id
+            session_id = match.session_id
             game_date = session.game_date if session else None
             channel_id = session.recruit_channel_id if session else None
 
@@ -267,7 +268,11 @@ class ManualMatchModal(discord.ui.Modal, title="Manual Match Entry"):
         t2 = "\n".join(f"{ROLE_EMOJIS[r]} **{r}**: <@{team2[r]}>" for r in ROLES)
         embed.add_field(name="🔵 Team 1 (Blue)", value=t1, inline=True)
         embed.add_field(name="🔴 Team 2 (Red)", value=t2, inline=True)
-        embed.set_footer(text=f"Match {match_id} · Manual entry by {interaction.user.display_name}")
+        footer = f"Match {match_id}"
+        if session_id is not None:
+            footer += f" · Session #{session_id}"
+        footer += f" · Manual entry by {interaction.user.display_name}"
+        embed.set_footer(text=footer)
 
         if channel_id:
             channel = interaction.client.get_channel(channel_id)
@@ -455,8 +460,12 @@ class AdminCog(commands.Cog):
             elif purpose == "results":
                 cfg.results_channel_id = channel.id
             await db.commit()
+        hint = (
+            " — the weekly auto-post and `/recruit-now` will post here."
+            if purpose == "recruit" else ""
+        )
         await interaction.response.send_message(
-            f"✅ {purpose} channel set to {channel.mention}", ephemeral=True
+            f"✅ {purpose} channel set to {channel.mention}{hint}", ephemeral=True
         )
 
     @app_commands.command(name="report", description="(admin) Report best-of-3 series outcome with screenshot.")
@@ -549,14 +558,16 @@ class AdminCog(commands.Cog):
     @app_commands.command(name="report-manual", description="(admin) Report best-of-3 series outcome without a screenshot.")
     @app_commands.describe(
         series_score='Series score from team1 perspective: "2-0", "2-1", "1-2", or "0-2"',
-        match_id="The match ID from the teams post (or use game_date instead)",
-        game_date="Game date YYYY-MM-DD (must be a Thursday) — alternative to match_id",
+        match_id="The match ID from the teams post",
+        session_id="Session ID — reports that session's latest unreported match",
+        game_date="Game date YYYY-MM-DD (must be a Thursday) — alternative to session_id",
     )
     async def report_manual(
         self,
         interaction: discord.Interaction,
         series_score: str,
         match_id: Optional[int] = None,
+        session_id: Optional[int] = None,
         game_date: Optional[str] = None,
     ):
         if not await self._is_admin(interaction):
@@ -571,15 +582,9 @@ class AdminCog(commands.Cog):
             )
             return
 
-        if match_id is None and game_date is None:
+        if sum(x is not None for x in (match_id, session_id, game_date)) != 1:
             await interaction.response.send_message(
-                "Provide either `match_id:` or `game_date:` (one of them).",
-                ephemeral=True,
-            )
-            return
-        if match_id is not None and game_date is not None:
-            await interaction.response.send_message(
-                "Provide only one of `match_id:` or `game_date:`, not both.",
+                "Provide exactly one of `match_id:`, `session_id:`, or `game_date:`.",
                 ephemeral=True,
             )
             return
@@ -592,23 +597,30 @@ class AdminCog(commands.Cog):
                     await interaction.followup.send(f"Match {match_id} not found.", ephemeral=True)
                     return
             else:
-                try:
-                    target_date = datetime.strptime(game_date, "%Y-%m-%d").date()
-                except ValueError:
-                    await interaction.followup.send(
-                        "Date must be YYYY-MM-DD format (e.g. `2026-05-14`).",
-                        ephemeral=True,
-                    )
-                    return
-                if target_date.weekday() != 3:
-                    await interaction.followup.send("Date must be a Thursday.", ephemeral=True)
-                    return
-                session = (await db.execute(
-                    select(InhouseSession).where(InhouseSession.game_date == target_date)
-                )).scalars().first()
-                if session is None:
-                    await interaction.followup.send(f"No session for {game_date}.", ephemeral=True)
-                    return
+                # Resolve a session (by id or date), then its latest unreported match.
+                if session_id is not None:
+                    session = await db.get(InhouseSession, session_id)
+                    if session is None:
+                        await interaction.followup.send(f"Session #{session_id} not found.", ephemeral=True)
+                        return
+                else:
+                    try:
+                        target_date = datetime.strptime(game_date, "%Y-%m-%d").date()
+                    except ValueError:
+                        await interaction.followup.send(
+                            "Date must be YYYY-MM-DD format (e.g. `2026-05-14`).",
+                            ephemeral=True,
+                        )
+                        return
+                    if target_date.weekday() != 3:
+                        await interaction.followup.send("Date must be a Thursday.", ephemeral=True)
+                        return
+                    session = (await db.execute(
+                        select(InhouseSession).where(InhouseSession.game_date == target_date)
+                    )).scalars().first()
+                    if session is None:
+                        await interaction.followup.send(f"No session for {game_date}.", ephemeral=True)
+                        return
                 match = (await db.execute(
                     select(Match)
                     .where(Match.session_id == session.id, Match.winner.is_(None))
@@ -616,7 +628,7 @@ class AdminCog(commands.Cog):
                 )).scalars().first()
                 if match is None:
                     await interaction.followup.send(
-                        f"No unreported match for {game_date}.",
+                        f"No unreported match for Session #{session.id}.",
                         ephemeral=True,
                     )
                     return
@@ -1166,11 +1178,13 @@ class AdminCog(commands.Cog):
         description="(admin) Override the matchmaker — paste in a roster you made yourself.",
     )
     @app_commands.describe(
-        game_date="Game date YYYY-MM-DD (must be a Thursday). If omitted, uses the soonest active session."
+        session_id="Session ID (from the recruitment post footer). Takes priority over game_date.",
+        game_date="Game date YYYY-MM-DD (must be a Thursday). Alternative to session_id.",
     )
     async def manual_match(
         self,
         interaction: discord.Interaction,
+        session_id: Optional[int] = None,
         game_date: Optional[str] = None,
     ):
         if not await self._is_admin(interaction):
@@ -1178,7 +1192,14 @@ class AdminCog(commands.Cog):
             return
 
         async with get_session() as db:
-            if game_date:
+            if session_id is not None:
+                session = await db.get(InhouseSession, session_id)
+                if session is None:
+                    await interaction.response.send_message(
+                        f"Session #{session_id} not found.", ephemeral=True
+                    )
+                    return
+            elif game_date:
                 # Parse and validate date
                 try:
                     target_date = datetime.strptime(game_date, "%Y-%m-%d").date()
@@ -1290,3 +1311,60 @@ class AdminCog(commands.Cog):
         if not reported:
             kwargs["view"] = EditRosterView(match.id)
         await interaction.response.send_message(content, **kwargs)
+
+    @app_commands.command(
+        name="matches",
+        description="(admin) List recent matches with their IDs and report status.",
+    )
+    @app_commands.describe(session_id="Only show matches for this session (optional).")
+    async def matches(self, interaction: discord.Interaction, session_id: Optional[int] = None):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        async with get_session() as db:
+            stmt = select(Match).order_by(Match.id.desc())
+            if session_id is not None:
+                stmt = stmt.where(Match.session_id == session_id)
+            else:
+                stmt = stmt.limit(20)
+            rows = (await db.execute(stmt)).scalars().all()
+            if not rows:
+                where = f" for Session #{session_id}" if session_id is not None else ""
+                await interaction.followup.send(f"No matches found{where}.", ephemeral=True)
+                return
+            sess_ids = {m.session_id for m in rows if m.session_id is not None}
+            sessions = {}
+            if sess_ids:
+                sessions = {
+                    s.id: s for s in (await db.execute(
+                        select(InhouseSession).where(InhouseSession.id.in_(sess_ids))
+                    )).scalars().all()
+                }
+
+        lines = []
+        for m in rows:
+            if m.session_id is not None and m.session_id in sessions:
+                where = f"Thu {sessions[m.session_id].game_date.strftime('%b %d')} · Session #{m.session_id}"
+            elif m.session_id is not None:
+                where = f"Session #{m.session_id}"
+            else:
+                where = "pickup"
+            status = (
+                f"{m.team1_wins}-{m.team2_wins} (Team {m.winner} won)"
+                if m.winner is not None else "⏳ unreported"
+            )
+            lines.append(f"`#{m.id}` · {where} · {status}")
+
+        title = (
+            f"🗒️ Matches for Session #{session_id}" if session_id is not None
+            else f"🗒️ Recent matches (last {len(rows)})"
+        )
+        chunk = title
+        for line in lines:
+            if len(chunk) + len(line) + 1 > 1900:
+                await interaction.followup.send(chunk, ephemeral=True)
+                chunk = ""
+            chunk = f"{chunk}\n{line}" if chunk else line
+        if chunk:
+            await interaction.followup.send(chunk, ephemeral=True)

@@ -57,25 +57,31 @@ Shows the inhouse leaderboard.
 **Optional argument:**
 - `role` — Filter to a specific role: `TOP`, `JUNGLE`, `MID`, `BOT`, or `SUPPORT`
 
-**Without `role`:** shows top 15 players by their best per-role conservative skill (mu - 3σ).
+**Without `role`:** shows top 15 players by their best per-role elo.
 **With `role`:** shows top 15 players for just that role.
 
 Players with 0 inhouse games played are excluded.
+
+### `/elo-history [user]`
+
+Shows a player's match-by-match inhouse elo history (defaults to you). Each line is a game: date, win/loss, series score, role, the `±` change to their INHOUSE rating, and the running cumulative modifier. The header shows current INHOUSE elo broken into rank-base + inhouse modifier + games played. Shows the last 15 games (with a count of any earlier ones).
 
 ---
 
 ## Recruitment commands
 
-### `/recruit-now <game_date>` (admin)
+### `/recruit-now <game_date> [channel]` (admin)
 
 Manually post a recruitment for a specific Thursday. Useful for testing or filling in if the scheduler missed a Friday.
 
-**Argument:**
+**Arguments:**
 - `game_date` — The Thursday in YYYY-MM-DD format (must be a Thursday)
+- `channel` *(optional)* — where to post
 
 **Behavior:**
-- Posts the recruitment embed in the channel where you ran the command (not the configured `recruit` channel)
+- Posts to the `channel` you pass, else the configured `recruit` channel (`/set-channel recruit`), else the channel you ran the command in.
 - Adds the three RSVP buttons: 🎮 Playing, ❌ Not Playing, 📺 Commentator
+- The recruitment embed footer shows `Session #N` — use that id with `/signups`, `/manual-match`, `/report-manual`, etc.
 
 ### `/match-preview` (admin)
 
@@ -84,6 +90,32 @@ Shows the top-3 matchmaker proposals for the currently active recruiting session
 Useful for sanity-checking what the matchmaker will produce before signups close.
 
 Requires at least 10 `playing` signups.
+
+### `/signups [session_id]` (admin)
+
+Lists everyone who signed up for a session and **the role(s) each playing player picked** — info that's hidden from the public recruitment message (role choices are private). Output looks like:
+
+```
+🎮 Playing (7)
+ • @Alice — TOP, MID
+ • @Bob — FILL
+❌ Not Playing (2): @Dave, @Eve
+📺 Commentators (1): @Finn
+```
+
+Ephemeral, so it doesn't leak role picks publicly. Defaults to the soonest active recruiting session; pass `session_id` (shown on the recruitment post footer as `Session #N`) to view a specific one.
+
+> **Reference IDs:** every night's messages carry a `Session #N` (recruitment post, signups-closed notice, teams post); match/result messages carry `Match #M`. Use the **session id** for session-scoped commands (`/signups`, `/manual-match`, `/report-manual`) and the **match id** for match-scoped ones (`/report`, `/match-roster`, `/unreport`). You never have to type a date.
+
+### `/cancel-session [session_id]` (admin)
+
+Cancels a recruiting or matched session (marks it `cancelled` and posts a notice in the recruit channel). Defaults to the soonest active session; pass `session_id` to target a specific one.
+
+### `/remove-signup <user> [session_id]` (admin)
+
+Removes a player's signup from a session (e.g. a no-show or someone who left the server) and refreshes the public counts. Defaults to the soonest recruiting session. Before teams are made this re-orders who's in the first 10; after teams are set, edit the roster with `/match-roster` instead.
+
+> **Note on signups:** if someone clicks 🎮 Playing without an approved Riot link, the bot warns them to `/link` (they'd otherwise be seeded at the default 1200), and `/signups` flags them with ⚠️ not linked.
 
 ---
 
@@ -97,7 +129,9 @@ Configures which channel the bot uses for various purposes.
 - `purpose` — `recruit` or `results`
 - `channel` — The channel to use
 
-**`recruit`** — Where the **scheduled Friday 9 AM** job posts its recruitment message. (Manual `/recruit-now` always posts in its own caller's channel.)
+**`recruit`** — Where the **scheduled Friday 9 AM** job posts its recruitment message, and where `/recruit-now` posts by default (unless you pass it an explicit `channel`). **Required for auto-posting:** if no recruit channel is set, the bot skips auto-posting (with a log warning) rather than posting to an arbitrary channel — so set this before relying on the weekly cron.
+
+> **Auto-post is now self-healing.** On startup the bot ensures any upcoming Thursday whose recruitment window has opened (within ~13 days) has a recruitment posted, so a missed Friday cron run (e.g. the host restarted at 9 AM) is recovered on the next boot instead of being skipped. The Friday cron and startup both run the same reconciliation.
 
 **`results`** — Currently scaffolded but not actively used. Match outcomes are posted in the same channel as the recruitment.
 
@@ -150,6 +184,8 @@ SUPPORT: @jack
 
 When validated, the match is created and posted publicly to the recruit channel. Works even after the auto-matchmaker has already run.
 
+Targets the soonest active session by default; pass `session_id` (from the recruitment post footer) or `game_date` to target a specific night.
+
 ### `/match-roster [match_id]` (admin)
 
 Prints an existing match's roster in the exact format `/manual-match` and `/pickup-series` accept, inside an ephemeral code block — so you don't have to retype @-mentions when editing teams. Defaults to the most recent match if `match_id` is omitted.
@@ -159,6 +195,10 @@ Two ways to edit from here:
 - **Copy/paste** — copy the code block, change whatever lines you need, then paste into `/manual-match` (sets teams) or `/pickup-series` (sets teams + a score).
 
 The output also lists each player's Riot name so you can tell who's who. The message is ephemeral (only you see it). A reported match can't be edited — `/unreport` it first.
+
+### `/matches [session_id]` (admin)
+
+Lists recent matches with their `Match #` IDs and report status, so you can find the id to use with `/report`, `/match-roster`, or `/unreport`. Each line shows the match id, its session/date (or `pickup`), and status (`⏳ unreported` or the final score + winner). Defaults to the last 20 matches; pass `session_id` to filter to one night. Ephemeral.
 
 ### `/roster-template` (admin)
 
@@ -187,13 +227,13 @@ Report the outcome of a match using an end-of-game screenshot.
 
 OCR is best-effort — confidence varies with screenshot resolution and overlay state. The admin always confirms before committing.
 
-### `/report-manual <match_id> <winner>` (admin)
+### `/report-manual <series_score> [match_id | session_id | game_date]` (admin)
 
-Same as `/report` but skips OCR. Use when you don't have a screenshot or OCR is failing.
+Same as `/report` but skips OCR/screenshot. Use when you don't have a screenshot or OCR is failing.
 
 **Arguments:**
-- `match_id` — The match number
-- `winner` — `team1` or `team2`
+- `series_score` — from team1's perspective: `2-0`, `2-1`, `1-2`, or `0-2`
+- Exactly **one** of: `match_id` (the match number), `session_id` (reports that session's latest unreported match), or `game_date` (`YYYY-MM-DD`, must be a Thursday)
 
 Updates ratings the same way as `/report`. Per-player performance rows are still created but with KDA fields blank.
 

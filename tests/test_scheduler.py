@@ -31,3 +31,19 @@ def test_monday_close_finds_this_weeks_thursday():
     this_thursday = monday + timedelta(days=(3 - monday.weekday()) % 7)
     assert this_thursday.weekday() == 3
     assert this_thursday == monday + timedelta(days=3)
+
+
+def test_upcoming_recruit_thursdays_returns_next_two():
+    """Self-heal reconciliation should target the next ~2 open Thursdays."""
+    from bot.cogs.recruitment import upcoming_recruit_thursdays
+    # From a Monday, the next two Thursdays fall within the 13-day window.
+    got = upcoming_recruit_thursdays(date(2026, 5, 25))
+    assert got == [date(2026, 5, 28), date(2026, 6, 4)]
+    assert all(d.weekday() == 3 for d in got)
+
+
+def test_upcoming_recruit_thursdays_includes_today_if_thursday():
+    from bot.cogs.recruitment import upcoming_recruit_thursdays
+    got = upcoming_recruit_thursdays(date(2026, 5, 28))  # a Thursday
+    assert got[0] == date(2026, 5, 28)
+    assert all(d.weekday() == 3 for d in got)

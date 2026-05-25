@@ -8,9 +8,11 @@ from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import select
 
-from bot.db.models import MatchPerformance, Player, Rating
+from bot.db.models import Match, MatchPerformance, Player, Rating
 from bot.db.session import get_session
 # elo is just an int; no import needed
+
+INHOUSE_ROLE = "INHOUSE"
 
 
 class StatsCog(commands.Cog):
@@ -102,4 +104,58 @@ class StatsCog(commands.Cog):
                 description="\n".join(lines) or "No games played yet.",
                 color=discord.Color.gold(),
             )
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(
+        name="elo-history",
+        description="Show a player's match-by-match inhouse elo changes.",
+    )
+    @app_commands.describe(user="Whose history to show (defaults to you)")
+    async def elo_history(
+        self, interaction: discord.Interaction, user: Optional[discord.Member] = None
+    ):
+        target = user or interaction.user
+        await interaction.response.defer()
+        async with get_session() as db:
+            rows = (await db.execute(
+                select(MatchPerformance, Match)
+                .join(Match, Match.id == MatchPerformance.match_id)
+                .where(MatchPerformance.discord_id == target.id)
+                .order_by(Match.reported_at.asc(), Match.id.asc())
+            )).all()
+            inhouse = await db.get(Rating, (target.id, INHOUSE_ROLE))
+
+        if not rows:
+            await interaction.followup.send(
+                f"{target.display_name} has no recorded inhouse games yet."
+            )
+            return
+
+        # Running cumulative of the INHOUSE modifier across all games (in order).
+        lines = []
+        cum = 0
+        for perf, match in rows:
+            cum += perf.inhouse_elo_delta or 0
+            when = match.reported_at.strftime("%b %d") if match.reported_at else "—"
+            wl = "🟢 W" if perf.won else "🔴 L"
+            d = perf.inhouse_elo_delta or 0
+            lines.append(
+                f"`{when}` {wl} {match.team1_wins}-{match.team2_wins} · "
+                f"{perf.role} · **{d:+d}** (cum {cum:+d})"
+            )
+
+        shown = lines[-15:]  # last 15 games to stay within embed limits
+        embed = discord.Embed(
+            title=f"📈 {target.display_name}'s Inhouse Elo History",
+            color=discord.Color.blurple(),
+        )
+        if inhouse is not None:
+            embed.description = (
+                f"**Current INHOUSE elo: {inhouse.elo}** "
+                f"(rank base {inhouse.base_seed}, inhouse {inhouse.inhouse_modifier:+d}, "
+                f"{inhouse.games_played} games)"
+            )
+        omitted = len(lines) - len(shown)
+        field_name = f"Last {len(shown)} games" + (f" (+{omitted} earlier)" if omitted else "")
+        embed.add_field(name=field_name, value="\n".join(shown), inline=False)
         await interaction.followup.send(embed=embed)
