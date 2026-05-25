@@ -163,15 +163,16 @@ def update_elo_series(
 # lane term spreads teammates apart by relative lane difficulty (within ~10).
 WIN_BASE_SWEEP = 20    # points for a 2-0 (sweep) vs an evenly-rated team
 WIN_BASE_NARROW = 10   # points for a 2-1 (narrow win) vs an evenly-rated team
-# In-house lobbies are matched close (teams usually within ~200 rating), so the
-# gap constants are calibrated to treat a 200-point gap as the favorite/underdog
-# extreme — that's where the curve reaches its peaks, filling the realistic band.
-UPSET_K = 42           # extra reward for winning as the rating underdog (and extra
-                       # penalty for losing as the favorite) — drives the peaks
-FAVORED_K = 23         # how much a rating favorite's gain is shaved (and a rating
+UPSET_K = 31           # extra reward for winning as the rating underdog (and extra
+                       # penalty for losing as the favorite) — drives the peaks. At
+                       # this weight a ~300 gap is the favorite/underdog extreme.
+FAVORED_K = 17         # how much a rating favorite's gain is shaved (and a rating
                        # underdog's loss is softened)
-WIN_FLOOR = 2          # a series win always nets at least this many points
-LOSS_FLOOR = 2         # a series loss always costs at least this many points
+# A win's TEAM result is floored here BEFORE the ±LANE_BIAS_CAP lane nudge, so the
+# worst a winner can net is WIN_TEAM_FLOOR - LANE_BIAS_CAP = +4 — a win is NEVER
+# negative, and a narrow favored win lands on the +9 floor. Must exceed
+# LANE_BIAS_CAP. Losses mirror it (a loss always costs at least this on the team side).
+WIN_TEAM_FLOOR = 9
 
 LANE_BIAS_K = 10     # weight on relative lane difficulty (your lane vs the team matchup)
 LANE_BIAS_CAP = 5    # max points the lane term can shift a single player
@@ -189,16 +190,19 @@ def update_elo_team_series(
 ) -> tuple[int, int]:
     """Points for one player from a team-vs-team SERIES result.
 
-    Shape (winning team, even lanes; the losing team mirrors as negatives).
-    Calibrated for an in-house lobby where teams are matched within ~200 rating,
-    so a 200-point gap is the favorite/underdog extreme::
+    Shape (winning team, even lanes; the losing team mirrors as negatives). A win
+    can never go negative: the team result is floored at +9, and with the ±5 lane
+    nudge on top the worst a winner nets is about +4. A narrow favored win lands on
+    the +9 floor (marked *)::
 
         team gap      2-0    2-1
-        +200 (fav)    +14    +4
-        +100          +17    +7
+        +300 (fav)    +14    +9*
+        +200          +16    +9*
+        +100          +18    +9*
         even          +20    +10
-        -100          +26    +16
-        -200 (dog)    +31    +21
+        -100          +24    +14
+        -200          +28    +18
+        -300 (dog)    +31    +21
 
     - Result base: a sweep (2-0) is worth WIN_BASE_SWEEP, a narrow win (2-1)
       WIN_BASE_NARROW. This is the compact middle where balanced games cluster.
@@ -224,23 +228,21 @@ def update_elo_team_series(
     base = WIN_BASE_SWEEP if sweep else WIN_BASE_NARROW
     if won:
         team_delta = base + UPSET_K * max(0.0, -favored) - FAVORED_K * max(0.0, favored)
+        team_delta = max(team_delta, float(WIN_TEAM_FLOOR))    # a win never goes low
     else:
         # mirror image: the favorite that loses (a choke) is docked extra; the
         # underdog that loses is docked less.
         team_delta = -(base + UPSET_K * max(0.0, favored) - FAVORED_K * max(0.0, -favored))
+        team_delta = min(team_delta, float(-WIN_TEAM_FLOOR))   # a loss always stings
 
     # Relative lane difficulty: a harder lane than the team matchup -> small bonus,
     # an easier lane -> small penalty. Centred on the team result so even lanes add 0.
+    # Rides on top of the floored team result, so a win still can't fall below +4.
     e_lane = expected_score(player_elo, lane_opponent_elo)
     lane_term = LANE_BIAS_K * (e_team - e_lane)
     lane_term = max(-LANE_BIAS_CAP, min(LANE_BIAS_CAP, lane_term))
 
-    delta = team_delta + lane_term
-    if won:
-        delta = max(delta, float(WIN_FLOOR))     # a win never costs points
-    else:
-        delta = min(delta, float(-LOSS_FLOOR))   # a loss never gains points
-    delta = round(delta)
+    delta = round(team_delta + lane_term)
     return player_elo + delta, delta
 
 
