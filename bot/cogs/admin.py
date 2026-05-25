@@ -464,8 +464,23 @@ class AdminCog(commands.Cog):
             " — the weekly auto-post and `/recruit-now` will post here."
             if purpose == "recruit" else ""
         )
+        # Warn now if the bot can't actually post here, rather than letting the
+        # weekly auto-post or /recruit-now fail later with a raw 403.
+        perms = channel.permissions_for(channel.guild.me)
+        missing = [
+            name for name, ok in (
+                ("View Channel", perms.view_channel),
+                ("Send Messages", perms.send_messages),
+                ("Embed Links", perms.embed_links),
+            ) if not ok
+        ]
+        warn = (
+            f"\n⚠️ Heads up: I'm missing {', '.join(missing)} in that channel — "
+            f"posting will fail until you grant it."
+            if missing else ""
+        )
         await interaction.response.send_message(
-            f"✅ {purpose} channel set to {channel.mention}{hint}", ephemeral=True
+            f"✅ {purpose} channel set to {channel.mention}{hint}{warn}", ephemeral=True
         )
 
     @app_commands.command(name="report", description="(admin) Report best-of-3 series outcome with screenshot.")

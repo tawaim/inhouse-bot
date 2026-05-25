@@ -796,6 +796,23 @@ class RecruitmentCog(commands.Cog):
         target = channel or await self._get_recruit_channel()
         if target is None and isinstance(interaction.channel, discord.TextChannel):
             target = interaction.channel
+        if target is None:
+            await interaction.followup.send(
+                "No channel to post in. Set one with `/set-channel recruit` or pass `channel:`.",
+                ephemeral=True,
+            )
+            return
+        # Pre-flight permission check so we surface an actionable message instead
+        # of Discord's raw "403 Missing Access" when the bot can't post here.
+        missing = self._missing_post_perms(target)
+        if missing:
+            await interaction.followup.send(
+                f"I can't post in {target.mention} — missing permission(s): "
+                f"{', '.join(missing)}. Grant them to my role (server or channel "
+                f"override) and try again.",
+                ephemeral=True,
+            )
+            return
         try:
             session = await self.post_recruitment(d, channel=target, open_ended=open_ended)
         except Exception as e:
@@ -1226,6 +1243,19 @@ class RecruitmentCog(commands.Cog):
             if isinstance(ch, discord.TextChannel):
                 return ch
         return None
+
+    @staticmethod
+    def _missing_post_perms(channel: discord.TextChannel) -> list[str]:
+        """Permissions the bot lacks to post a recruitment (embed + buttons) in
+        `channel`. Empty list means it can post. Missing View Channel is what
+        Discord reports as the cryptic '403 Missing Access' (error 50001)."""
+        perms = channel.permissions_for(channel.guild.me)
+        needed = {
+            "View Channel": perms.view_channel,
+            "Send Messages": perms.send_messages,
+            "Embed Links": perms.embed_links,
+        }
+        return [name for name, ok in needed.items() if not ok]
 
     async def _build_match_embed(
         self, session: InhouseSession, match: Match, proposal
