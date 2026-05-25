@@ -154,6 +154,44 @@ def update_elo_series(
     return player_elo + delta, delta
 
 
+# A player's elo change is driven by the TEAM-vs-TEAM matchup (so teammates move
+# by nearly the same amount), plus a small capped bias for how their own rating
+# compares to their direct lane opponent's. The cap keeps teammates within ~10.
+LANE_BIAS_K = 10     # mini-elo weight applied to the lane (role) matchup
+LANE_BIAS_CAP = 5    # max elo the lane matchup can shift on top of the team result
+
+
+def update_elo_team_series(
+    team_avg: int,
+    opp_team_avg: int,
+    player_elo: int,
+    lane_opponent_elo: int,
+    player_team_wins: int,
+    opponent_team_wins: int,
+    games_played: int,
+) -> tuple[int, int]:
+    """Team-based series elo with a small lane-matchup bias.
+
+    Bulk of the change is TEAM vs TEAM: K * (actual - expected(team_avg, opp_avg)),
+    identical for everyone on a team. A small, capped term (±LANE_BIAS_CAP) nudges
+    each player by how their own rating compares to their direct lane opponent, so
+    holding a tough lane is rewarded a little. Net effect: teammates land within
+    ~10 elo of each other instead of swinging wildly by individual rating.
+
+    Returns (new_elo, delta).
+    """
+    total = player_team_wins + opponent_team_wins
+    if total == 0:
+        return player_elo, 0
+    actual = player_team_wins / total
+    k = k_factor(games_played)
+    team_term = k * (actual - expected_score(team_avg, opp_team_avg))
+    lane_term = LANE_BIAS_K * (actual - expected_score(player_elo, lane_opponent_elo))
+    lane_term = max(-LANE_BIAS_CAP, min(LANE_BIAS_CAP, lane_term))
+    delta = round(team_term + lane_term)
+    return player_elo + delta, delta
+
+
 def parse_series_score(score: str) -> tuple[int, int]:
     """Parse '2-0', '2-1', '1-2', '0-2' (or '2:0' etc.) into (team1_wins, team2_wins).
     Returns (-1, -1) on invalid input.

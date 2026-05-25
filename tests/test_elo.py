@@ -198,3 +198,46 @@ def test_series_2_1_equal_peers():
     from bot.services.elo import update_elo_series
     _, delta = update_elo_series(1500, 1500, 2, 1, games_played=20)
     assert delta == 8
+
+
+# ---------- team-based series elo (team-vs-team + small lane bias) ----------
+
+def test_team_series_balanced_sweep_magnitude():
+    """Balanced teams, 2-0, even lane: team base (K/2 = 25) + capped lane bias."""
+    from bot.services.elo import update_elo_team_series
+    _, d = update_elo_team_series(1500, 1500, player_elo=1500, lane_opponent_elo=1500,
+                                  player_team_wins=2, opponent_team_wins=0, games_played=20)
+    assert 24 <= d <= 31
+
+
+def test_team_series_teammates_within_10():
+    """The whole point: teammates in one match land within ~10 of each other no
+    matter how different their individual ratings (and laners) are."""
+    from bot.services.elo import update_elo_team_series
+    matchups = [(800, 2400), (2400, 800), (1600, 1600), (1200, 1800), (2000, 1000)]
+    deltas = [
+        update_elo_team_series(1600, 1600, player_elo=e, lane_opponent_elo=lo,
+                               player_team_wins=2, opponent_team_wins=1, games_played=20)[1]
+        for (e, lo) in matchups
+    ]
+    assert max(deltas) - min(deltas) <= 10
+    assert all(x > 0 for x in deltas)  # winning team — everyone gains
+
+
+def test_team_series_lane_bias_bounded():
+    from bot.services.elo import update_elo_team_series, LANE_BIAS_CAP
+    args = dict(player_team_wins=2, opponent_team_wins=0, games_played=20)
+    _, hard = update_elo_team_series(1500, 1500, player_elo=1000, lane_opponent_elo=2500, **args)
+    _, easy = update_elo_team_series(1500, 1500, player_elo=2000, lane_opponent_elo=1000, **args)
+    assert (hard - easy) <= 2 * LANE_BIAS_CAP + 1  # lane swing stays within the cap band
+
+
+def test_team_series_underdog_team_gains_more():
+    """A lower-rated team that wins still gains more than a favored team that wins —
+    but it's shared across the whole team, not concentrated on one player."""
+    from bot.services.elo import update_elo_team_series
+    _, underdog = update_elo_team_series(1400, 1700, player_elo=1400, lane_opponent_elo=1700,
+                                         player_team_wins=2, opponent_team_wins=0, games_played=20)
+    _, favored = update_elo_team_series(1700, 1400, player_elo=1700, lane_opponent_elo=1400,
+                                        player_team_wins=2, opponent_team_wins=0, games_played=20)
+    assert underdog > favored

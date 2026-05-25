@@ -22,8 +22,7 @@ from bot.services.elo import (
     parse_series_score,
     seed_from_past_season,
     seed_from_rank,
-    update_elo,
-    update_elo_series,
+    update_elo_team_series,
 )
 from bot.services.ocr import parse_screenshot
 from bot.services.opgg_client import OpggClient
@@ -960,16 +959,16 @@ class AdminCog(commands.Cog):
 
             team1_won = team1_wins > team2_wins  # for the perf-row 'won' field
 
-            # Update ratings: chess-elo delta is added to inhouse_modifier
-            # (NOT base_seed). Then `elo` is recomputed = base_seed + modifier.
-            # base_seed is rank-derived and only changed by sync.
-            #
-            # Series scoring: 2-0 = 1.0 actual, 2-1 = 0.667 actual, etc.
-            # Each player gets ONE elo update for the entire series.
+            # Update ratings: the delta is driven by TEAM vs TEAM (so teammates
+            # move together), with a small capped bias for the direct lane
+            # opponent. Added to inhouse_modifier (NOT base_seed); elo is then
+            # recomputed = base_seed + modifier. Each player gets ONE update for
+            # the whole series (2-0 = 1.0 actual, 2-1 = 0.667, etc.).
             for role, role_rating in t1_role_ratings.items():
                 pid = team1[role]
-                _, role_delta = update_elo_series(
-                    role_rating.elo, t2_role_avg,
+                _, role_delta = update_elo_team_series(
+                    team_avg=t1_role_avg, opp_team_avg=t2_role_avg,
+                    player_elo=role_rating.elo, lane_opponent_elo=t2_role_ratings[role].elo,
                     player_team_wins=team1_wins, opponent_team_wins=team2_wins,
                     games_played=role_rating.games_played,
                 )
@@ -978,8 +977,9 @@ class AdminCog(commands.Cog):
                 role_rating.games_played += 1
 
                 overall = t1_overall[pid]
-                _, overall_delta = update_elo_series(
-                    overall.elo, t2_overall_avg,
+                _, overall_delta = update_elo_team_series(
+                    team_avg=t1_overall_avg, opp_team_avg=t2_overall_avg,
+                    player_elo=overall.elo, lane_opponent_elo=t2_overall[team2[role]].elo,
                     player_team_wins=team1_wins, opponent_team_wins=team2_wins,
                     games_played=overall.games_played,
                 )
@@ -990,8 +990,9 @@ class AdminCog(commands.Cog):
 
             for role, role_rating in t2_role_ratings.items():
                 pid = team2[role]
-                _, role_delta = update_elo_series(
-                    role_rating.elo, t1_role_avg,
+                _, role_delta = update_elo_team_series(
+                    team_avg=t2_role_avg, opp_team_avg=t1_role_avg,
+                    player_elo=role_rating.elo, lane_opponent_elo=t1_role_ratings[role].elo,
                     player_team_wins=team2_wins, opponent_team_wins=team1_wins,
                     games_played=role_rating.games_played,
                 )
@@ -1000,8 +1001,9 @@ class AdminCog(commands.Cog):
                 role_rating.games_played += 1
 
                 overall = t2_overall[pid]
-                _, overall_delta = update_elo_series(
-                    overall.elo, t1_overall_avg,
+                _, overall_delta = update_elo_team_series(
+                    team_avg=t2_overall_avg, opp_team_avg=t1_overall_avg,
+                    player_elo=overall.elo, lane_opponent_elo=t1_overall[team1[role]].elo,
                     player_team_wins=team2_wins, opponent_team_wins=team1_wins,
                     games_played=overall.games_played,
                 )
