@@ -1,7 +1,7 @@
 """ORM models. Matches the schema laid out in the design doc."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from sqlalchemy import (
@@ -129,6 +129,10 @@ class Match(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("sessions.id"), nullable=True)
+    # The day the series was actually played. Sessions have their own game_date;
+    # pickups don't, so this lets us record/display the real date. Display falls
+    # back to reported_at when unset.
+    game_date: Mapped[Optional[date]] = mapped_column(Date)
     team1_json: Mapped[str] = mapped_column(Text)  # {"TOP": discord_id, ...}
     team2_json: Mapped[str] = mapped_column(Text)
     predicted_balance: Mapped[Optional[float]] = mapped_column(Float)

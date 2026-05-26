@@ -124,12 +124,13 @@ class StatsCog(commands.Cog):
         cum = 0
         for perf, match in rows:
             cum += perf.inhouse_elo_delta or 0
-            when = match.reported_at.strftime("%b %d") if match.reported_at else "—"
+            day = match.game_date or match.reported_at
+            when = day.strftime("%b %d") if day else "—"
             wl = "🟢 W" if perf.won else "🔴 L"
             d = perf.inhouse_elo_delta or 0
             lines.append(
                 f"`{when}` {wl} {match.team1_wins}-{match.team2_wins} · "
-                f"{perf.role} · **{d:+d}** (cum {cum:+d})"
+                f"{perf.role} · **{d:+d}** (net {cum:+d})"
             )
 
         shown = lines[-15:]  # last 15 games to stay within embed limits
@@ -243,4 +244,55 @@ class StatsCog(commands.Cog):
         else:
             embed.add_field(name="Champions played", value="_not recorded yet_", inline=False)
 
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(
+        name="recent-games",
+        description="A player's most recent games: champion, KDA, and result.",
+    )
+    @app_commands.describe(user="Whose games to view (defaults to you)",
+                           count="How many games to show (default 10, max 25)")
+    async def recent_games(
+        self, interaction: discord.Interaction,
+        user: Optional[discord.Member] = None, count: Optional[int] = 10,
+    ):
+        await interaction.response.defer()
+        target = user or interaction.user
+        count = max(1, min(count or 10, 25))
+        async with get_session() as db:
+            player = await db.get(Player, target.id)
+            rows = (await db.execute(
+                select(GameStat, Match)
+                .join(Match, Match.id == GameStat.match_id)
+                .where(GameStat.discord_id == target.id)
+                .order_by(GameStat.match_id.desc(), GameStat.game_no.desc())
+                .limit(count)
+            )).all()
+
+        name = player.riot_game_name if (player and player.riot_game_name) else target.display_name
+        if not rows:
+            await interaction.followup.send(
+                f"**{name}** has no per-game stats recorded yet (champ/KDA are entered from screenshots)."
+            )
+            return
+
+        lines = []
+        for gs, match in rows:
+            wl = "🟢 W" if gs.won else "🔴 L"
+            champ = gs.champion or "?"
+            if None not in (gs.kills, gs.deaths, gs.assists):
+                ratio = (gs.kills + gs.assists) / gs.deaths if gs.deaths else float(gs.kills + gs.assists)
+                kda = f"{gs.kills}/{gs.deaths}/{gs.assists} ({ratio:.1f})"
+            else:
+                kda = "—"
+            role = f" {gs.role}" if gs.role else ""
+            day = match.game_date or match.reported_at
+            when = day.strftime("%b %d") if day else "—"
+            lines.append(f"`{when}` {wl} · **{champ}**{role} · {kda}  ·  `s{gs.match_id} g{gs.game_no}`")
+
+        embed = discord.Embed(
+            title=f"🎮 {name} — last {len(lines)} games",
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
+        )
         await interaction.followup.send(embed=embed)

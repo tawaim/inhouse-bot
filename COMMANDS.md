@@ -78,6 +78,10 @@ Full per-player stat card (defaults to you):
 
 KDA and champions come from the **per-game `game_stats`** table, which is populated manually from end-game screenshots (no server-side OCR). Sections show *"not recorded yet"* until that per-game data is entered.
 
+### `/recent-games [user] [count]`
+
+A player's most recent **individual games** (defaults to you, last 10; `count` up to 25). Each line: win/loss, champion, role, KDA (with ratio), and which series/game it was. Reads from the per-game `game_stats` table. Use this for "what did I play last few games"; use `/elo-history` for the per-**series** elo timeline.
+
 ---
 
 ## Recruitment commands
