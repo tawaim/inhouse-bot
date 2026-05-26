@@ -61,7 +61,7 @@ class StatsCog(commands.Cog):
             b = wl.setdefault(key, {"wins": 0, "losses": 0})
             b["wins" if p.won else "losses"] += 1
 
-        ranked = sorted(rating_rows, key=lambda rp: rp[0].elo, reverse=True)[:15]
+        ranked = sorted(rating_rows, key=lambda rp: rp[0].elo, reverse=True)
         lines = []
         for i, (rating, player) in enumerate(ranked, 1):
             name = player.riot_game_name or f"<@{player.discord_id}>"
@@ -74,14 +74,22 @@ class StatsCog(commands.Cog):
                 tail = ""
             else:
                 br = best_role.get(player.discord_id)
-                tail = f" · top {br[0]}" if br else ""
+                tail = f" · {br[0]}" if br else ""
             lines.append(
                 f"`{i:>2}.` **{name}** · {wins}W-{losses}L ({wr:.0f}%) · "
                 f"{games} games · Elo {rating.elo}{tail}"
             )
+        # Show everyone with a game; only trim if we'd exceed Discord's 4096-char
+        # description limit.
+        desc = ""
+        for n, ln in enumerate(lines):
+            if len(desc) + len(ln) + 1 > 3900:
+                desc += f"\n…and {len(lines) - n} more"
+                break
+            desc += ("\n" if desc else "") + ln
         embed = discord.Embed(
             title=f"🏆 Leaderboard — {role}" if role else "🏆 Inhouse Leaderboard (overall)",
-            description="\n".join(lines) or "No games played yet.",
+            description=desc or "No games played yet.",
             color=discord.Color.gold(),
         )
         await interaction.followup.send(embed=embed)

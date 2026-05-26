@@ -57,8 +57,10 @@ Shows the inhouse leaderboard.
 **Optional argument:**
 - `role` — Filter to a specific role: `TOP`, `JUNGLE`, `MID`, `BOT`, or `SUPPORT`
 
-**Without `role`:** shows top 15 players by their **overall INHOUSE** elo — games count is each player's **total series across all roles**, with their best role labelled (`· top MID`).
-**With `role`:** shows top 15 players for just that role, with that role's elo, games, and W/L.
+**Without `role`:** ranks **everyone with a game** by their **overall INHOUSE** elo — games count is each player's **total series across all roles**, with their best role labelled (`· MID`).
+**With `role`:** ranks everyone who's played that role, with that role's elo, games, and W/L.
+
+The list isn't capped — it shows the whole field (trimmed only if it would exceed Discord's message-size limit).
 
 Players with 0 inhouse games played are excluded. Note: a best-of-3 series counts as **one** game.
 
