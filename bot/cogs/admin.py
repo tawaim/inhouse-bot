@@ -282,8 +282,8 @@ class ManualMatchModal(discord.ui.Modal, title="Manual Match Entry"):
         embed = discord.Embed(title=title, color=discord.Color.green())
         t1 = "\n".join(f"{ROLE_EMOJIS[r]} **{r}**: <@{team1[r]}>" for r in ROLES)
         t2 = "\n".join(f"{ROLE_EMOJIS[r]} **{r}**: <@{team2[r]}>" for r in ROLES)
-        embed.add_field(name="🔵 Team 1 (Blue)", value=t1, inline=True)
-        embed.add_field(name="🔴 Team 2 (Red)", value=t2, inline=True)
+        embed.add_field(name=f"🔵 {TEAM_NAMES[1]} (Blue)", value=t1, inline=True)
+        embed.add_field(name=f"🔴 {TEAM_NAMES[2]} (Red)", value=t2, inline=True)
         footer = f"Match {match_id}"
         if session_id is not None:
             footer += f" · Session #{session_id}"
@@ -417,7 +417,7 @@ class PickupSeriesModal(discord.ui.Modal, title="Pickup Series Result"):
         await self._commit(match_id, team1_wins, team2_wins, None, interaction.user.id, None)
 
         # Post confirmation in the channel
-        winner_label = "Team 1" if team1_wins > team2_wins else "Team 2"
+        winner_label = TEAM_NAMES[1] if team1_wins > team2_wins else TEAM_NAMES[2]
         from bot.config import ROLE_EMOJIS
         embed = discord.Embed(
             title=f"🎮 Pickup Series Result: {team1_wins}-{team2_wins}",
@@ -426,8 +426,8 @@ class PickupSeriesModal(discord.ui.Modal, title="Pickup Series Result"):
         )
         t1 = "\n".join(f"{ROLE_EMOJIS[r]} **{r}**: <@{team1[r]}>" for r in ROLES)
         t2 = "\n".join(f"{ROLE_EMOJIS[r]} **{r}**: <@{team2[r]}>" for r in ROLES)
-        embed.add_field(name="🔵 Team 1 (Blue)", value=t1, inline=True)
-        embed.add_field(name="🔴 Team 2 (Red)", value=t2, inline=True)
+        embed.add_field(name=f"🔵 {TEAM_NAMES[1]} (Blue)", value=t1, inline=True)
+        embed.add_field(name=f"🔴 {TEAM_NAMES[2]} (Red)", value=t2, inline=True)
         embed.set_footer(text=f"Match {match_id} · Pickup by {interaction.user.display_name}")
 
         # Post publicly in the same channel where the command was run
@@ -637,7 +637,7 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(
         name="clear-match-channels",
-        description="(admin) Delete the per-team match roles + channels.",
+        description="(admin) Delete the per-team channels and strip the team roles from members.",
     )
     async def clear_match_channels(self, interaction: discord.Interaction):
         if not await self._is_admin(interaction):
@@ -662,13 +662,18 @@ class AdminCog(commands.Cog):
                 if channel is not None:
                     await channel.delete(reason="In-house match cleanup")
                     removed.append(f"#{name}")
+                # Keep the role itself (reused next match) — just unassign it from
+                # everyone who currently holds it.
                 role = discord.utils.get(guild.roles, name=name)
                 if role is not None:
-                    await role.delete(reason="In-house match cleanup")
-                    removed.append(f"@{name}")
+                    holders = list(role.members)  # snapshot before removing
+                    for member in holders:
+                        await member.remove_roles(role, reason="In-house match cleanup")
+                    if holders:
+                        removed.append(f"@{name} (cleared from {len(holders)})")
         except discord.Forbidden:
             await interaction.followup.send(
-                "❌ I lack permission to delete those roles/channels.", ephemeral=True
+                "❌ I lack permission to delete those channels or edit those roles.", ephemeral=True
             )
             return
         msg = "🧹 Removed: " + ", ".join(removed) if removed else "Nothing to remove."
@@ -717,7 +722,7 @@ class AdminCog(commands.Cog):
         parsed = parse_screenshot(image_bytes)
 
         # Show admin a confirmation embed before committing
-        winner_label = "team1" if team1_wins > team2_wins else "team2"
+        winner_label = TEAM_NAMES[1] if team1_wins > team2_wins else TEAM_NAMES[2]
         embed = discord.Embed(
             title=f"Confirm Match {match_id} Report",
             color=discord.Color.orange(),
@@ -845,7 +850,7 @@ class AdminCog(commands.Cog):
                 return
 
         await self._commit_result(match_id, team1_wins, team2_wins, None, interaction.user.id, None)
-        winner_team = "team1" if team1_wins > team2_wins else "team2"
+        winner_team = TEAM_NAMES[1] if team1_wins > team2_wins else TEAM_NAMES[2]
         await interaction.followup.send(
             f"✅ Match {match_id} recorded. Series {team1_wins}-{team2_wins} ({winner_team} wins). Elo updated.",
             ephemeral=True,
@@ -1576,8 +1581,8 @@ class AdminCog(commands.Cog):
         content = (
             f"🧩 **Match {match.id}** roster{score}. {edit_hint}\n"
             f"```\n{format_roster_block(team1, team2)}\n```\n"
-            f"**Team 1** — {who(team1)}\n"
-            f"**Team 2** — {who(team2)}"
+            f"**{TEAM_NAMES[1]}** — {who(team1)}\n"
+            f"**{TEAM_NAMES[2]}** — {who(team2)}"
         )
         kwargs = dict(ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
         if not reported:
@@ -1623,7 +1628,7 @@ class AdminCog(commands.Cog):
             else:
                 where = "pickup"
             status = (
-                f"{m.team1_wins}-{m.team2_wins} (Team {m.winner} won)"
+                f"{m.team1_wins}-{m.team2_wins} ({TEAM_NAMES[m.winner]} won)"
                 if m.winner is not None else "⏳ unreported"
             )
             lines.append(f"`#{m.id}` · {where} · {status}")
@@ -1721,8 +1726,8 @@ class AdminCog(commands.Cog):
         if reported:
             head += f" · result {match.team1_wins}-{match.team2_wins}"
         body = (
-            f"{head}\n\n🔵 **Team 1** — avg **{a1}**\n" + "\n".join(l1)
-            + f"\n\n🔴 **Team 2** — avg **{a2}**\n" + "\n".join(l2)
+            f"{head}\n\n🔵 **{TEAM_NAMES[1]}** — avg **{a1}**\n" + "\n".join(l1)
+            + f"\n\n🔴 **{TEAM_NAMES[2]}** — avg **{a2}**\n" + "\n".join(l2)
             + f"\n\nTeam elo gap: **{abs(a1 - a2)}**"
         )
         if reported and any(did in perfs for did in ids):

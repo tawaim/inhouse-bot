@@ -39,7 +39,7 @@ from bot.config import Config, ROLE_EMOJIS, ROLES
 from bot.db.models import GuildConfig, Match, MatchPerformance, Player, ProposalSet, Rating, Session as InhouseSession, Signup
 from bot.db.session import get_session
 from bot.services.matchmaking import MatchProposal, PlayerInput, TeamAssignment, make_match, make_top_matches
-from bot.cogs.admin import format_roster_block
+from bot.cogs.admin import TEAM_NAMES, format_roster_block
 
 log = logging.getLogger(__name__)
 
@@ -376,8 +376,8 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
                 f"{ROLE_EMOJIS[role]} **{role}**: <@{pid}>"
                 for role, pid in chosen["team2"].items()
             )
-            embed.add_field(name="🔵 Team 1 (Blue)", value=t1, inline=True)
-            embed.add_field(name="🔴 Team 2 (Red)", value=t2, inline=True)
+            embed.add_field(name=f"🔵 {TEAM_NAMES[1]} (Blue)", value=t1, inline=True)
+            embed.add_field(name=f"🔴 {TEAM_NAMES[2]} (Red)", value=t2, inline=True)
             embed.set_footer(
                 text=f"Match {match.id} · Session #{session.id} (Option {label}) · "
                      f"Skill diff: {chosen['balance_diff']:.2f} · "
@@ -720,8 +720,8 @@ class RecruitmentCog(commands.Cog):
                 f"{ROLE_EMOJIS[role]} **{role}**: <@{pid}>"
                 for role, pid in proposal.team2.by_role.items()
             )
-            embed.add_field(name="🔵 Team 1", value=t1, inline=True)
-            embed.add_field(name="🔴 Team 2", value=t2, inline=True)
+            embed.add_field(name=f"🔵 {TEAM_NAMES[1]}", value=t1, inline=True)
+            embed.add_field(name=f"🔴 {TEAM_NAMES[2]}", value=t2, inline=True)
             embed.set_footer(
                 text=f"Skill diff: {proposal.balance_diff:.2f} · "
                      f"Off-role assignments: {proposal.role_penalty:.1f}"
@@ -889,8 +889,8 @@ class RecruitmentCog(commands.Cog):
             )
             t1 = "\n".join(f"**{role}**: <@{pid}>" for role, pid in proposal.team1.by_role.items())
             t2 = "\n".join(f"**{role}**: <@{pid}>" for role, pid in proposal.team2.by_role.items())
-            embed.add_field(name="Team 1", value=t1, inline=True)
-            embed.add_field(name="Team 2", value=t2, inline=True)
+            embed.add_field(name=TEAM_NAMES[1], value=t1, inline=True)
+            embed.add_field(name=TEAM_NAMES[2], value=t2, inline=True)
             embed.set_footer(
                 text=f"Skill diff: {proposal.balance_diff:.2f} · "
                      f"Off-role: {proposal.role_penalty:.1f}"
@@ -969,8 +969,8 @@ class RecruitmentCog(commands.Cog):
             f"🧩 Template from {len(ordered)} signups for **{session.game_date.strftime('%b %d')}**. {note}\n"
             f"Copy, edit, and paste into `/manual-match`:\n"
             f"```\n{format_roster_block(team1, team2)}\n```\n"
-            f"**Team 1** — {who(team1)}\n"
-            f"**Team 2** — {who(team2)}"
+            f"**{TEAM_NAMES[1]}** — {who(team1)}\n"
+            f"**{TEAM_NAMES[2]}** — {who(team2)}"
         )
         await interaction.followup.send(
             content, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
@@ -1276,8 +1276,8 @@ class RecruitmentCog(commands.Cog):
                        for role, pid in proposal.team1.by_role.items())
         t2 = "\n".join(f"{ROLE_EMOJIS[role]} **{role}**: <@{pid}>"
                        for role, pid in proposal.team2.by_role.items())
-        embed.add_field(name="🔵 Team 1 (Blue)", value=t1, inline=True)
-        embed.add_field(name="🔴 Team 2 (Red)", value=t2, inline=True)
+        embed.add_field(name=f"🔵 {TEAM_NAMES[1]} (Blue)", value=t1, inline=True)
+        embed.add_field(name=f"🔴 {TEAM_NAMES[2]} (Red)", value=t2, inline=True)
         embed.set_footer(
             text=f"Match {match.id} · Skill diff: {proposal.balance_diff:.2f} · "
                  f"Game time: Thu 9:30 PM ET"

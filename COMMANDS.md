@@ -169,7 +169,7 @@ Requires a category set via `/set-match-category` first. Idempotent: re-running 
 
 ### `/clear-match-channels` (admin)
 
-Deletes the `lo-gang` and `team-10` roles and their private channels (looked up under the configured category, falling back to a guild-wide name match). Run this between matches to tear down the previous game's comms.
+Deletes the `lo-gang` and `team-10` private channels (looked up under the configured category, falling back to a guild-wide name match) and **strips those roles from every member** — the roles themselves are kept so they're reused on the next `/match-channels`. Run this between matches to tear down the previous game's comms.
 
 ### `/link-user <member> <riot_id>` (admin)
 
