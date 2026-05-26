@@ -192,3 +192,5 @@ class GuildConfig(Base):
     recruit_channel_id: Mapped[Optional[int]] = mapped_column(BigInteger)
     results_channel_id: Mapped[Optional[int]] = mapped_column(BigInteger)
     admin_channel_id: Mapped[Optional[int]] = mapped_column(BigInteger)
+    # Category under which /match-channels creates the per-team private channels.
+    match_category_id: Mapped[Optional[int]] = mapped_column(BigInteger)

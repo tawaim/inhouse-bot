@@ -146,6 +146,31 @@ Configures which channel the bot uses for various purposes.
 
 If you don't configure `recruit`, the Friday job falls back to the first channel where the bot has send permission.
 
+### `/set-match-category <category>` (admin)
+
+Sets the Discord **category** under which `/match-channels` creates the per-team private channels.
+
+**Arguments:**
+- `category` — the category channel to nest the team channels under
+
+The bot warns immediately if it's missing **Manage Channels** / **Manage Roles** (both are required for `/match-channels`), and its own role must sit **above** the team roles to assign them.
+
+### `/match-channels <match_id>` (admin)
+
+Creates the two per-team private comms for a match:
+- A Discord **role** per team — `lo-gang` (team 1) and `team-10` (team 2) — reused if it already exists.
+- Assigns that role to each of the team's 5 players (members who've left the server are skipped and reported).
+- A **private text channel** per team under the configured category (`/set-match-category`), visible only to that team's role, the bot, and the League Admin role. Posts an intro message tagging the team.
+
+**Arguments:**
+- `match_id` — the match whose rosters to build channels from (see `/matches`)
+
+Requires a category set via `/set-match-category` first. Idempotent: re-running reuses existing roles/channels and refreshes their permissions.
+
+### `/clear-match-channels` (admin)
+
+Deletes the `lo-gang` and `team-10` roles and their private channels (looked up under the configured category, falling back to a guild-wide name match). Run this between matches to tear down the previous game's comms.
+
 ### `/link-user <member> <riot_id>` (admin)
 
 Link a Discord member directly to a Riot ID, bypassing the approval flow.

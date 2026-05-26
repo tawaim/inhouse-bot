@@ -39,6 +39,23 @@ log = logging.getLogger(__name__)
 _MENTION_RE = re.compile(r"<@!?(\d+)>")
 _ROLE_LINE_RE = re.compile(r"^\s*([A-Za-z]+)\s*:\s*(.+?)\s*$")
 
+# Fixed names for the two teams' Discord roles + private channels (set by the
+# league). team1 -> "lo-gang", team2 -> "team-10". Used by /match-channels and
+# /clear-match-channels. Already valid Discord channel names (lowercase, hyphens).
+TEAM_NAMES = {1: "lo-gang", 2: "team-10"}
+
+
+async def _safe_fetch_member(guild: discord.Guild, user_id: int) -> Optional[discord.Member]:
+    """Return a guild member from cache, falling back to an API fetch. None if
+    the user isn't in the server (e.g. they left after the roster was built)."""
+    member = guild.get_member(user_id)
+    if member is not None:
+        return member
+    try:
+        return await guild.fetch_member(user_id)
+    except discord.HTTPException:
+        return None
+
 
 class ManualMatchParseError(ValueError):
     """Raised when the manual match input is malformed. Message is shown to admin."""
@@ -481,6 +498,181 @@ class AdminCog(commands.Cog):
         await interaction.response.send_message(
             f"✅ {purpose} channel set to {channel.mention}{hint}{warn}", ephemeral=True
         )
+
+    @app_commands.command(
+        name="set-match-category",
+        description="(admin) Set the category where /match-channels creates per-team channels.",
+    )
+    @app_commands.describe(category="The category to create the team channels under")
+    async def set_match_category(
+        self, interaction: discord.Interaction, category: discord.CategoryChannel
+    ):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        async with get_session() as db:
+            cfg = await db.get(GuildConfig, interaction.guild_id)
+            if cfg is None:
+                cfg = GuildConfig(guild_id=interaction.guild_id)
+                db.add(cfg)
+            cfg.match_category_id = category.id
+            await db.commit()
+        # Warn now if the bot can't create roles/channels, rather than failing later.
+        me = interaction.guild.me
+        missing = [
+            name for name, ok in (
+                ("Manage Channels", me.guild_permissions.manage_channels),
+                ("Manage Roles", me.guild_permissions.manage_roles),
+            ) if not ok
+        ]
+        warn = (
+            f"\n⚠️ Heads up: I'm missing {', '.join(missing)} — `/match-channels` will fail "
+            f"until you grant it (and my role must sit above the team roles)."
+            if missing else ""
+        )
+        await interaction.response.send_message(
+            f"✅ Match channels will be created under **{category.name}**.{warn}", ephemeral=True
+        )
+
+    async def _create_team_channel(
+        self,
+        guild: discord.Guild,
+        category: discord.CategoryChannel,
+        name: str,
+        roster: dict[str, int],
+        admin_role: Optional[discord.Role],
+    ) -> str:
+        """Create-or-reuse the team's role + private channel, assign the role to
+        the roster's members, and post an intro. Returns a one-line summary."""
+        # Role: reuse a same-named one if present, else create it.
+        role = discord.utils.get(guild.roles, name=name)
+        if role is None:
+            role = await guild.create_role(
+                name=name, mentionable=True, reason="In-house match team role"
+            )
+        added: list[discord.Member] = []
+        missing = 0
+        for pid in roster.values():
+            member = await _safe_fetch_member(guild, pid)
+            if member is None:
+                missing += 1
+                continue
+            await member.add_roles(role, reason="In-house match team")
+            added.append(member)
+
+        # Private channel: only this role (+ bot + admins) can see it.
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        }
+        if admin_role is not None:
+            overwrites[admin_role] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True
+            )
+        channel = discord.utils.get(category.text_channels, name=name)
+        if channel is None:
+            channel = await guild.create_text_channel(
+                name, category=category, overwrites=overwrites,
+                reason="In-house match team channel",
+            )
+        else:
+            await channel.edit(overwrites=overwrites)
+
+        mentions = " ".join(m.mention for m in added) or "_(no members found)_"
+        await channel.send(f"**{name}** — your team for this match: {mentions}")
+        miss = f", {missing} not in server" if missing else ""
+        return f"• {channel.mention} ({role.mention}) — {len(added)} added{miss}"
+
+    @app_commands.command(
+        name="match-channels",
+        description="(admin) Create private per-team roles + channels for a match.",
+    )
+    @app_commands.describe(match_id="The match ID to build team channels for")
+    async def match_channels(self, interaction: discord.Interaction, match_id: int):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+
+        async with get_session() as db:
+            match = await db.get(Match, match_id)
+            if match is None:
+                await interaction.followup.send(f"Match {match_id} not found.", ephemeral=True)
+                return
+            cfg = await db.get(GuildConfig, interaction.guild_id)
+            team1 = {k: int(v) for k, v in json.loads(match.team1_json).items()}
+            team2 = {k: int(v) for k, v in json.loads(match.team2_json).items()}
+
+        category = (
+            guild.get_channel(cfg.match_category_id)
+            if cfg and cfg.match_category_id else None
+        )
+        if not isinstance(category, discord.CategoryChannel):
+            await interaction.followup.send(
+                "No match category configured. Run `/set-match-category` first.", ephemeral=True
+            )
+            return
+
+        admin_role = discord.utils.get(guild.roles, name=self.config.admin_role_name)
+        try:
+            lines = []
+            for team_no, roster in ((1, team1), (2, team2)):
+                lines.append(
+                    await self._create_team_channel(
+                        guild, category, TEAM_NAMES[team_no], roster, admin_role
+                    )
+                )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ I lack permission to create roles/channels. Grant me **Manage Roles** + "
+                "**Manage Channels**, and make sure my role sits above the team roles.",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            f"✅ Match {match_id} team channels ready:\n" + "\n".join(lines), ephemeral=True
+        )
+
+    @app_commands.command(
+        name="clear-match-channels",
+        description="(admin) Delete the per-team match roles + channels.",
+    )
+    async def clear_match_channels(self, interaction: discord.Interaction):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        async with get_session() as db:
+            cfg = await db.get(GuildConfig, interaction.guild_id)
+        category = (
+            guild.get_channel(cfg.match_category_id)
+            if cfg and cfg.match_category_id else None
+        )
+        removed: list[str] = []
+        try:
+            for name in TEAM_NAMES.values():
+                channel = None
+                if isinstance(category, discord.CategoryChannel):
+                    channel = discord.utils.get(category.text_channels, name=name)
+                if channel is None:
+                    channel = discord.utils.get(guild.text_channels, name=name)
+                if channel is not None:
+                    await channel.delete(reason="In-house match cleanup")
+                    removed.append(f"#{name}")
+                role = discord.utils.get(guild.roles, name=name)
+                if role is not None:
+                    await role.delete(reason="In-house match cleanup")
+                    removed.append(f"@{name}")
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ I lack permission to delete those roles/channels.", ephemeral=True
+            )
+            return
+        msg = "🧹 Removed: " + ", ".join(removed) if removed else "Nothing to remove."
+        await interaction.followup.send(msg, ephemeral=True)
 
     @app_commands.command(name="report", description="(admin) Report best-of-3 series outcome with screenshot.")
     @app_commands.describe(
