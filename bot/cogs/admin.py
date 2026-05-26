@@ -651,32 +651,56 @@ class AdminCog(commands.Cog):
             guild.get_channel(cfg.match_category_id)
             if cfg and cfg.match_category_id else None
         )
+
+        # role.members reads the member cache, which can be cold right after a
+        # restart (the original bug: nothing got stripped because it was empty).
+        # Make sure the roster is loaded — chunk, then fall back to an API fetch.
+        if not guild.chunked:
+            try:
+                await guild.chunk()
+            except Exception:
+                log.warning("clear-match-channels: guild.chunk() failed", exc_info=True)
+        members = list(guild.members)
+        if len(members) <= 1:
+            try:
+                members = [m async for m in guild.fetch_members(limit=None)]
+            except Exception:
+                log.warning("clear-match-channels: fetch_members failed", exc_info=True)
+
         removed: list[str] = []
-        try:
-            for name in TEAM_NAMES.values():
-                channel = None
-                if isinstance(category, discord.CategoryChannel):
-                    channel = discord.utils.get(category.text_channels, name=name)
-                if channel is None:
-                    channel = discord.utils.get(guild.text_channels, name=name)
-                if channel is not None:
+        problems: list[str] = []
+        for name in TEAM_NAMES.values():
+            # Delete the private channel.
+            channel = None
+            if isinstance(category, discord.CategoryChannel):
+                channel = discord.utils.get(category.text_channels, name=name)
+            if channel is None:
+                channel = discord.utils.get(guild.text_channels, name=name)
+            if channel is not None:
+                try:
                     await channel.delete(reason="In-house match cleanup")
                     removed.append(f"#{name}")
-                # Keep the role itself (reused next match) — just unassign it from
-                # everyone who currently holds it.
-                role = discord.utils.get(guild.roles, name=name)
-                if role is not None:
-                    holders = list(role.members)  # snapshot before removing
-                    for member in holders:
+                except discord.Forbidden:
+                    problems.append(f"can't delete #{name}")
+            # Keep the role itself (reused next match) — just strip it from holders.
+            role = discord.utils.get(guild.roles, name=name)
+            if role is not None:
+                holders = [m for m in members if role in m.roles]
+                stripped = 0
+                for member in holders:
+                    try:
                         await member.remove_roles(role, reason="In-house match cleanup")
-                    if holders:
-                        removed.append(f"@{name} (cleared from {len(holders)})")
-        except discord.Forbidden:
-            await interaction.followup.send(
-                "❌ I lack permission to delete those channels or edit those roles.", ephemeral=True
-            )
-            return
-        msg = "🧹 Removed: " + ", ".join(removed) if removed else "Nothing to remove."
+                        stripped += 1
+                    except discord.Forbidden:
+                        pass
+                if stripped:
+                    removed.append(f"@{name} (cleared from {stripped})")
+                elif holders:
+                    problems.append(f"can't remove @{name} — move my role above it")
+
+        msg = ("🧹 Removed: " + ", ".join(removed)) if removed else "Nothing to remove."
+        if problems:
+            msg += "\n⚠️ " + "; ".join(problems)
         await interaction.followup.send(msg, ephemeral=True)
 
     @app_commands.command(name="report", description="(admin) Report best-of-3 series outcome with screenshot.")
