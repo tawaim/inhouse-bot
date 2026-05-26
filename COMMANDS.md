@@ -174,7 +174,7 @@ The bot warns immediately if it's missing **Manage Channels** / **Manage Roles**
 ### `/match-channels <match_id>` (admin)
 
 Creates the two per-team private comms for a match:
-- A Discord **role** per team — `lo-gang` (team 1) and `team-10` (team 2) — reused if it already exists.
+- A Discord **role** per team — `lo gang` (team 1) and `team 10` (team 2) — reused if it already exists. The matching **channels** use the hyphenated form (`lo-gang` / `team-10`) since Discord channel names can't contain spaces.
 - Assigns that role to each of the team's 5 players (members who've left the server are skipped and reported).
 - A **private text channel** per team under the configured category (`/set-match-category`), visible only to that team's role, the bot, and the League Admin role. Posts an intro message tagging the team.
 
@@ -185,7 +185,7 @@ Requires a category set via `/set-match-category` first. Idempotent: re-running 
 
 ### `/clear-match-channels` (admin)
 
-Deletes the `lo-gang` and `team-10` private channels (looked up under the configured category, falling back to a guild-wide name match) and **strips those roles from every member** — the roles themselves are kept so they're reused on the next `/match-channels`. Run this between matches to tear down the previous game's comms.
+Deletes the `lo-gang` / `team-10` private channels and **strips the `lo gang` / `team 10` roles from every member** (the roles themselves are kept for reuse). It pulls the full member list from the API so it works even on a cold cache, runs channel-deletion and role-stripping as independent steps, and reports if it can't remove a role (e.g. the bot's role needs to sit above it). Run this between matches to tear down the previous game's comms.
 
 ### `/link-user <member> <riot_id>` (admin)
 

@@ -39,10 +39,17 @@ log = logging.getLogger(__name__)
 _MENTION_RE = re.compile(r"<@!?(\d+)>")
 _ROLE_LINE_RE = re.compile(r"^\s*([A-Za-z]+)\s*:\s*(.+?)\s*$")
 
-# Fixed names for the two teams' Discord roles + private channels (set by the
-# league). team1 -> "lo-gang", team2 -> "team-10". Used by /match-channels and
-# /clear-match-channels. Already valid Discord channel names (lowercase, hyphens).
-TEAM_NAMES = {1: "lo-gang", 2: "team-10"}
+# Display + Discord ROLE names for the two teams (these keep their spaces).
+# team1 -> "lo gang", team2 -> "team 10". Used by /match-channels and
+# /clear-match-channels and the result embeds.
+TEAM_NAMES = {1: "lo gang", 2: "team 10"}
+
+
+def team_channel_name(team_name: str) -> str:
+    """A team's text-channel name. Discord channel names can't contain spaces and
+    are lowercased, so the channel is the hyphenated form of the role/display
+    name: 'lo gang' -> 'lo-gang', 'team 10' -> 'team-10'."""
+    return team_name.lower().replace(" ", "-")
 
 
 async def _safe_fetch_member(guild: discord.Guild, user_id: int) -> Optional[discord.Member]:
@@ -570,10 +577,11 @@ class AdminCog(commands.Cog):
             overwrites[admin_role] = discord.PermissionOverwrite(
                 view_channel=True, send_messages=True
             )
-        channel = discord.utils.get(category.text_channels, name=name)
+        chan_name = team_channel_name(name)  # 'lo gang' -> 'lo-gang'
+        channel = discord.utils.get(category.text_channels, name=chan_name)
         if channel is None:
             channel = await guild.create_text_channel(
-                name, category=category, overwrites=overwrites,
+                chan_name, category=category, overwrites=overwrites,
                 reason="In-house match team channel",
             )
         else:
@@ -655,19 +663,20 @@ class AdminCog(commands.Cog):
         removed: list[str] = []
         problems: list[str] = []
 
-        # --- Phase 1: delete the two private channels ---
+        # --- Phase 1: delete the two private channels (hyphenated names) ---
         for name in TEAM_NAMES.values():
+            chan_name = team_channel_name(name)
             channel = None
             if isinstance(category, discord.CategoryChannel):
-                channel = discord.utils.get(category.text_channels, name=name)
+                channel = discord.utils.get(category.text_channels, name=chan_name)
             if channel is None:
-                channel = discord.utils.get(guild.text_channels, name=name)
+                channel = discord.utils.get(guild.text_channels, name=chan_name)
             if channel is not None:
                 try:
                     await channel.delete(reason="In-house match cleanup")
-                    removed.append(f"#{name}")
+                    removed.append(f"#{chan_name}")
                 except discord.Forbidden:
-                    problems.append(f"can't delete #{name}")
+                    problems.append(f"can't delete #{chan_name}")
 
         # --- Phase 2: strip the roles (runs independently of Phase 1) ---
         # Pull the FULL member list from the API so this never depends on a warm
@@ -681,8 +690,12 @@ class AdminCog(commands.Cog):
             members = list(guild.members)
 
         for name in TEAM_NAMES.values():
-            role = discord.utils.get(guild.roles, name=name)
+            # Match the spaced role name, but also fall back to the hyphenated
+            # form in case an older run created the role with hyphens.
+            role = (discord.utils.get(guild.roles, name=name)
+                    or discord.utils.get(guild.roles, name=team_channel_name(name)))
             if role is None:
+                problems.append(f"role '{name}' not found")
                 continue
             # Union the API result with any cached holders, just in case.
             holders = {m for m in members if role in m.roles} | set(role.members)
