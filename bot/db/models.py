@@ -166,6 +166,28 @@ class MatchPerformance(Base):
     match: Mapped[Match] = relationship(back_populates="performances")
 
 
+class GameStat(Base):
+    """Per-game, per-player stats within a series (Match).
+
+    A Match is a best-of-3, so a player can have up to 3 GameStat rows for one
+    Match — one per game, each with its own champion and KDA (players swap champs
+    between games). Populated manually from screenshots (no server-side OCR), and
+    used by /player-stats for champion pools and KDA. Independent of
+    MatchPerformance, which stays one-row-per-series for elo bookkeeping.
+    """
+    __tablename__ = "game_stats"
+
+    match_id: Mapped[int] = mapped_column(Integer, ForeignKey("matches.id"), primary_key=True)
+    game_no: Mapped[int] = mapped_column(Integer, primary_key=True)  # 1, 2, 3 within the series
+    discord_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    role: Mapped[Optional[str]] = mapped_column(String(8))
+    champion: Mapped[Optional[str]] = mapped_column(String(32))
+    kills: Mapped[Optional[int]] = mapped_column(Integer)
+    deaths: Mapped[Optional[int]] = mapped_column(Integer)
+    assists: Mapped[Optional[int]] = mapped_column(Integer)
+    won: Mapped[bool] = mapped_column(Boolean)
+
+
 class ProposalSet(Base):
     """Holds the top-3 match proposals while waiting for the owner to pick one.
     Once the owner clicks an option, that proposal is committed as a Match

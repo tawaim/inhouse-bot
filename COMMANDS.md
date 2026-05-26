@@ -57,14 +57,24 @@ Shows the inhouse leaderboard.
 **Optional argument:**
 - `role` — Filter to a specific role: `TOP`, `JUNGLE`, `MID`, `BOT`, or `SUPPORT`
 
-**Without `role`:** shows top 15 players by their best per-role elo.
-**With `role`:** shows top 15 players for just that role.
+**Without `role`:** shows top 15 players by their **overall INHOUSE** elo — games count is each player's **total series across all roles**, with their best role labelled (`· top MID`).
+**With `role`:** shows top 15 players for just that role, with that role's elo, games, and W/L.
 
-Players with 0 inhouse games played are excluded.
+Players with 0 inhouse games played are excluded. Note: a best-of-3 series counts as **one** game.
 
 ### `/elo-history [user]`
 
 Shows a player's match-by-match inhouse elo history (defaults to you). Each line is a game: date, win/loss, series score, role, the `±` change to their INHOUSE rating, and the running cumulative modifier. The header shows current INHOUSE elo broken into rank-base + inhouse modifier + games played. Shows the last 15 games (with a count of any earlier ones).
+
+### `/player-stats [user]`
+
+Full per-player stat card (defaults to you):
+- **Overall** — series W-L + win%, INHOUSE elo, and per-**game** W-L total.
+- **By role** — series record + elo for each role they've played.
+- **KDA** — KDA ratio, per-game average, and totals (from per-game data).
+- **Champions played** — each champ with games + W-L, most-played first.
+
+KDA and champions come from the **per-game `game_stats`** table, which is populated manually from end-game screenshots (no server-side OCR). Sections show *"not recorded yet"* until that per-game data is entered.
 
 ---
 
