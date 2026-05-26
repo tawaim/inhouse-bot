@@ -204,48 +204,48 @@ def test_series_2_1_equal_peers():
 
 def test_team_series_balanced_curve_even():
     """Balanced teams, even lanes -> hit the fixed result base exactly:
-    2-0 = WIN_BASE_SWEEP (+20), 2-1 = WIN_BASE_NARROW (+10)."""
+    2-0 = WIN_BASE_SWEEP (+28), 2-1 = WIN_BASE_NARROW (+18)."""
     from bot.services.elo import update_elo_team_series, WIN_BASE_SWEEP, WIN_BASE_NARROW
     _, sweep = update_elo_team_series(1500, 1500, player_elo=1500, lane_opponent_elo=1500,
                                       player_team_wins=2, opponent_team_wins=0)
     _, narrow = update_elo_team_series(1500, 1500, player_elo=1500, lane_opponent_elo=1500,
                                        player_team_wins=2, opponent_team_wins=1)
-    assert sweep == WIN_BASE_SWEEP == 20
-    assert narrow == WIN_BASE_NARROW == 10
+    assert sweep == WIN_BASE_SWEEP == 28
+    assert narrow == WIN_BASE_NARROW == 18
 
 
 def test_team_series_favorite_at_200_gap():
-    """A 200-rating favorite winning: the 2-0 is shaved to ~+16, and the narrow 2-1
-    lands on the +9 team floor (never the old negative). Lane mirrors team (~0)."""
+    """A 200-rating favorite winning: the 2-0 is shaved to ~+24, and the narrow 2-1
+    lands on the +15 team floor (never the old negative). Lane mirrors team (~0)."""
     from bot.services.elo import update_elo_team_series
     _, sweep = update_elo_team_series(1500, 1300, player_elo=1500, lane_opponent_elo=1300,
                                       player_team_wins=2, opponent_team_wins=0)
     _, narrow = update_elo_team_series(1500, 1300, player_elo=1500, lane_opponent_elo=1300,
                                        player_team_wins=2, opponent_team_wins=1)
-    assert sweep == 16
-    assert narrow == 9
+    assert sweep == 24
+    assert narrow == 15
 
 
-def test_team_series_narrow_favored_win_floors_at_nine():
-    """A narrow win as the favorite sits on the team floor (+9) with an even lane,
-    no matter how lopsided the rating gap — this is the '9 at the floor'."""
+def test_team_series_narrow_favored_win_floors_at_fifteen():
+    """A narrow win as the favorite sits on the team floor (+15) with an even lane,
+    no matter how lopsided the rating gap."""
     from bot.services.elo import update_elo_team_series, WIN_TEAM_FLOOR
     for fav, dog in [(1600, 1400), (1800, 1200), (2400, 800)]:
         _, narrow = update_elo_team_series(fav, dog, player_elo=fav, lane_opponent_elo=dog,
                                            player_team_wins=2, opponent_team_wins=1)
-        assert narrow == WIN_TEAM_FLOOR == 9
+        assert narrow == WIN_TEAM_FLOOR == 15
 
 
 def test_team_series_underdog_at_300_gap():
-    """A 300-rating underdog (the wide-spread extreme) hits the peak: 2-0 ~ +31,
-    2-1 ~ +21."""
+    """A 300-rating underdog (the wide-spread extreme) hits the peak: 2-0 ~ +39,
+    2-1 ~ +29."""
     from bot.services.elo import update_elo_team_series
     _, sweep = update_elo_team_series(1200, 1500, player_elo=1200, lane_opponent_elo=1500,
                                       player_team_wins=2, opponent_team_wins=0)
     _, narrow = update_elo_team_series(1200, 1500, player_elo=1200, lane_opponent_elo=1500,
                                        player_team_wins=2, opponent_team_wins=1)
-    assert sweep == 31
-    assert narrow == 21
+    assert sweep == 39
+    assert narrow == 29
 
 
 def test_team_series_win_never_negative_extreme():
@@ -267,8 +267,8 @@ def test_team_series_loss_mirrors_and_never_positive():
     _, underdog_loss = update_elo_team_series(1300, 1500, player_elo=1300, lane_opponent_elo=1500,
                                               player_team_wins=0, opponent_team_wins=2)
     assert choke < underdog_loss < 0
-    assert choke == -28          # the favorite's choke (200 gap) is docked extra
-    assert underdog_loss == -16  # softened for the underdog that loses
+    assert choke == -36          # the favorite's choke (200 gap) is docked extra
+    assert underdog_loss == -24  # softened for the underdog that loses
 
 
 def test_team_series_teammates_within_10():

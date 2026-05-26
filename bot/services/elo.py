@@ -161,18 +161,18 @@ def update_elo_series(
 # rating underdog pays more and winning as the favorite pays less (the "peaks"),
 # but a win is NEVER negative and a loss is NEVER positive. Finally a small, capped
 # lane term spreads teammates apart by relative lane difficulty (within ~10).
-WIN_BASE_SWEEP = 20    # points for a 2-0 (sweep) vs an evenly-rated team
-WIN_BASE_NARROW = 10   # points for a 2-1 (narrow win) vs an evenly-rated team
+WIN_BASE_SWEEP = 28    # points for a 2-0 (sweep) vs an evenly-rated team
+WIN_BASE_NARROW = 18   # points for a 2-1 (narrow win) vs an evenly-rated team
 UPSET_K = 31           # extra reward for winning as the rating underdog (and extra
                        # penalty for losing as the favorite) — drives the peaks. At
                        # this weight a ~300 gap is the favorite/underdog extreme.
 FAVORED_K = 17         # how much a rating favorite's gain is shaved (and a rating
                        # underdog's loss is softened)
 # A win's TEAM result is floored here BEFORE the ±LANE_BIAS_CAP lane nudge, so the
-# worst a winner can net is WIN_TEAM_FLOOR - LANE_BIAS_CAP = +4 — a win is NEVER
-# negative, and a narrow favored win lands on the +9 floor. Must exceed
+# worst a winner can net is WIN_TEAM_FLOOR - LANE_BIAS_CAP = +10 — a win is NEVER
+# negative, and a narrow favored win lands on the +15 floor. Must exceed
 # LANE_BIAS_CAP. Losses mirror it (a loss always costs at least this on the team side).
-WIN_TEAM_FLOOR = 9
+WIN_TEAM_FLOOR = 15
 
 LANE_BIAS_K = 10     # weight on relative lane difficulty (your lane vs the team matchup)
 LANE_BIAS_CAP = 5    # max points the lane term can shift a single player
@@ -190,19 +190,19 @@ def update_elo_team_series(
 ) -> tuple[int, int]:
     """Points for one player from a team-vs-team SERIES result.
 
-    Shape (winning team, even lanes; the losing team mirrors as negatives). A win
-    can never go negative: the team result is floored at +9, and with the ±5 lane
-    nudge on top the worst a winner nets is about +4. A narrow favored win lands on
-    the +9 floor (marked *)::
+    Shape (winning team, even lanes; the losing team mirrors as negatives). Tuned
+    so a typical series lands in the 20s/30s. A win can never go negative: the team
+    result is floored at +15, and with the ±5 lane nudge on top the worst a winner
+    nets is about +10. A narrow favored win lands on the +15 floor (marked *)::
 
         team gap      2-0    2-1
-        +300 (fav)    +14    +9*
-        +200          +16    +9*
-        +100          +18    +9*
-        even          +20    +10
-        -100          +24    +14
-        -200          +28    +18
-        -300 (dog)    +31    +21
+        +300 (fav)    +22    +15*
+        +200          +24    +15*
+        +100          +26    +16
+        even          +28    +18
+        -100          +32    +22
+        -200          +36    +26
+        -300 (dog)    +39    +29
 
     - Result base: a sweep (2-0) is worth WIN_BASE_SWEEP, a narrow win (2-1)
       WIN_BASE_NARROW. This is the compact middle where balanced games cluster.
