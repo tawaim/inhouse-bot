@@ -652,25 +652,11 @@ class AdminCog(commands.Cog):
             if cfg and cfg.match_category_id else None
         )
 
-        # role.members reads the member cache, which can be cold right after a
-        # restart (the original bug: nothing got stripped because it was empty).
-        # Make sure the roster is loaded — chunk, then fall back to an API fetch.
-        if not guild.chunked:
-            try:
-                await guild.chunk()
-            except Exception:
-                log.warning("clear-match-channels: guild.chunk() failed", exc_info=True)
-        members = list(guild.members)
-        if len(members) <= 1:
-            try:
-                members = [m async for m in guild.fetch_members(limit=None)]
-            except Exception:
-                log.warning("clear-match-channels: fetch_members failed", exc_info=True)
-
         removed: list[str] = []
         problems: list[str] = []
+
+        # --- Phase 1: delete the two private channels ---
         for name in TEAM_NAMES.values():
-            # Delete the private channel.
             channel = None
             if isinstance(category, discord.CategoryChannel):
                 channel = discord.utils.get(category.text_channels, name=name)
@@ -682,21 +668,35 @@ class AdminCog(commands.Cog):
                     removed.append(f"#{name}")
                 except discord.Forbidden:
                     problems.append(f"can't delete #{name}")
-            # Keep the role itself (reused next match) — just strip it from holders.
+
+        # --- Phase 2: strip the roles (runs independently of Phase 1) ---
+        # Pull the FULL member list from the API so this never depends on a warm
+        # member cache — the original bug was a cold cache leaving role.members
+        # empty, so channels deleted but the roles were never removed.
+        members: list[discord.Member] = []
+        try:
+            members = [m async for m in guild.fetch_members(limit=None)]
+        except Exception:
+            log.warning("clear-match-channels: fetch_members failed; using cache", exc_info=True)
+            members = list(guild.members)
+
+        for name in TEAM_NAMES.values():
             role = discord.utils.get(guild.roles, name=name)
-            if role is not None:
-                holders = [m for m in members if role in m.roles]
-                stripped = 0
-                for member in holders:
-                    try:
-                        await member.remove_roles(role, reason="In-house match cleanup")
-                        stripped += 1
-                    except discord.Forbidden:
-                        pass
-                if stripped:
-                    removed.append(f"@{name} (cleared from {stripped})")
-                elif holders:
-                    problems.append(f"can't remove @{name} — move my role above it")
+            if role is None:
+                continue
+            # Union the API result with any cached holders, just in case.
+            holders = {m for m in members if role in m.roles} | set(role.members)
+            stripped = 0
+            for member in holders:
+                try:
+                    await member.remove_roles(role, reason="In-house match cleanup")
+                    stripped += 1
+                except discord.Forbidden:
+                    pass
+            if stripped:
+                removed.append(f"@{name} (cleared from {stripped})")
+            elif holders:
+                problems.append(f"can't remove @{name} — move my role above it")
 
         msg = ("🧹 Removed: " + ", ".join(removed)) if removed else "Nothing to remove."
         if problems:
