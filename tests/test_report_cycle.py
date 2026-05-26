@@ -102,3 +102,57 @@ def test_report_idempotency_and_unreport_roundtrip(tmp_path):
         await close_db()
 
     asyncio.run(body())
+
+
+def test_report_uses_prematch_lane_opponent_elos(tmp_path):
+    """Regression: lane bias must read PRE-MATCH elos. Team 1 is committed before
+    Team 2's loop runs, so Team 2's lane opponents (Team 1) must not reflect Team
+    1's just-applied gains. We recompute every stored delta from the pre-match
+    seeds and require an exact match — Team 2 is the case the old bug skewed."""
+    from bot.services.elo import update_elo_team_series
+
+    elos = {1: 1600, 2: 1650, 3: 1650, 4: 1400, 5: 1450,
+            6: 1700, 7: 1950, 8: 1700, 9: 1600, 10: 1400}
+    t1_avg = round(sum(elos[p] for p in TEAM1.values()) / 5)   # 1550
+    t2_avg = round(sum(elos[p] for p in TEAM2.values()) / 5)   # 1670
+
+    async def body():
+        await init_db(_config(str(tmp_path / "lane.db")))
+        async with get_session() as db:
+            for pid, e in elos.items():
+                db.add(Player(discord_id=pid, riot_game_name=f"P{pid}", riot_tag_line="NA1",
+                              riot_puuid=f"puuid{pid}", link_status="approved"))
+                for role in ROLES_PLUS:
+                    db.add(Rating(discord_id=pid, role=role, elo=e, base_seed=e,
+                                  inhouse_modifier=0, games_played=15))
+            m = Match(session_id=None, team1_json=json.dumps(TEAM1), team2_json=json.dumps(TEAM2))
+            db.add(m)
+            await db.commit()
+            await db.refresh(m)
+            match_id = m.id
+
+        dummy = types.SimpleNamespace()
+        await AdminCog._commit_result(dummy, match_id, 2, 1, None, 999, None)  # team1 wins 2-1
+
+        async with get_session() as db:
+            from sqlalchemy import select
+            perfs = {(p.discord_id, p.role): p for p in
+                     (await db.execute(select(MatchPerformance))).scalars().all()}
+
+        # Team 1 (won) — lane opponents are Team 2, untouched when T1 is scored.
+        for role, pid in TEAM1.items():
+            _, exp = update_elo_team_series(t1_avg, t2_avg, player_elo=elos[pid],
+                                            lane_opponent_elo=elos[TEAM2[role]],
+                                            player_team_wins=2, opponent_team_wins=1)
+            assert perfs[(pid, role)].inhouse_elo_delta == exp
+        # Team 2 (lost) — lane opponents are Team 1, already committed. Must still
+        # match the PRE-match recompute (would be off-by-~1 with the old bug).
+        for role, pid in TEAM2.items():
+            _, exp = update_elo_team_series(t2_avg, t1_avg, player_elo=elos[pid],
+                                            lane_opponent_elo=elos[TEAM1[role]],
+                                            player_team_wins=1, opponent_team_wins=2)
+            assert perfs[(pid, role)].inhouse_elo_delta == exp
+
+        await close_db()
+
+    asyncio.run(body())

@@ -957,6 +957,17 @@ class AdminCog(commands.Cog):
             t1_overall_avg = average_elo([r.elo for r in t1_overall.values()])
             t2_overall_avg = average_elo([r.elo for r in t2_overall.values()])
 
+            # Snapshot every pre-match elo too. The per-player matchup inputs
+            # (player_elo and lane_opponent_elo) must ALL be pre-match: Team 1 is
+            # committed before Team 2's loop runs, so reading Team 1's ratings live
+            # there would pick up their just-applied gains and skew (and break the
+            # symmetry of) Team 2's lane bias. Snapshotting makes scoring identical
+            # regardless of which team is processed first.
+            t1_role_pre = {role: r.elo for role, r in t1_role_ratings.items()}
+            t2_role_pre = {role: r.elo for role, r in t2_role_ratings.items()}
+            t1_overall_pre = {pid: r.elo for pid, r in t1_overall.items()}
+            t2_overall_pre = {pid: r.elo for pid, r in t2_overall.items()}
+
             team1_won = team1_wins > team2_wins  # for the perf-row 'won' field
 
             # Update ratings: the delta is driven by TEAM vs TEAM (so teammates
@@ -968,7 +979,7 @@ class AdminCog(commands.Cog):
                 pid = team1[role]
                 _, role_delta = update_elo_team_series(
                     team_avg=t1_role_avg, opp_team_avg=t2_role_avg,
-                    player_elo=role_rating.elo, lane_opponent_elo=t2_role_ratings[role].elo,
+                    player_elo=t1_role_pre[role], lane_opponent_elo=t2_role_pre[role],
                     player_team_wins=team1_wins, opponent_team_wins=team2_wins,
                     games_played=role_rating.games_played,
                 )
@@ -979,7 +990,7 @@ class AdminCog(commands.Cog):
                 overall = t1_overall[pid]
                 _, overall_delta = update_elo_team_series(
                     team_avg=t1_overall_avg, opp_team_avg=t2_overall_avg,
-                    player_elo=overall.elo, lane_opponent_elo=t2_overall[team2[role]].elo,
+                    player_elo=t1_overall_pre[pid], lane_opponent_elo=t2_overall_pre[team2[role]],
                     player_team_wins=team1_wins, opponent_team_wins=team2_wins,
                     games_played=overall.games_played,
                 )
@@ -992,7 +1003,7 @@ class AdminCog(commands.Cog):
                 pid = team2[role]
                 _, role_delta = update_elo_team_series(
                     team_avg=t2_role_avg, opp_team_avg=t1_role_avg,
-                    player_elo=role_rating.elo, lane_opponent_elo=t1_role_ratings[role].elo,
+                    player_elo=t2_role_pre[role], lane_opponent_elo=t1_role_pre[role],
                     player_team_wins=team2_wins, opponent_team_wins=team1_wins,
                     games_played=role_rating.games_played,
                 )
@@ -1003,7 +1014,7 @@ class AdminCog(commands.Cog):
                 overall = t2_overall[pid]
                 _, overall_delta = update_elo_team_series(
                     team_avg=t2_overall_avg, opp_team_avg=t1_overall_avg,
-                    player_elo=overall.elo, lane_opponent_elo=t1_overall[team1[role]].elo,
+                    player_elo=t2_overall_pre[pid], lane_opponent_elo=t1_overall_pre[team1[role]],
                     player_team_wins=team2_wins, opponent_team_wins=team1_wins,
                     games_played=overall.games_played,
                 )
