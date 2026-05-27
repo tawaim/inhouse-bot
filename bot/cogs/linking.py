@@ -164,13 +164,15 @@ class LinkApprovalView(discord.ui.View):
                         inhouse_modifier=0,
                         games_played=0,
                     ))
-                elif seed_from_data or account_changed:
+                elif (seed_from_data or account_changed) and not player.manual_seed:
                     # Re-seed base_seed on any re-link with real rank/past data
                     # (not just an account swap), keeping modifier and
-                    # games_played intact. Recompute displayed elo.
+                    # games_played intact. Recompute displayed elo. Skipped when
+                    # an admin has set a manual seed (/set-seed) — that sticks
+                    # until /refresh-seed clears it.
                     existing.base_seed = seed_elo
                     existing.elo = existing.base_seed + existing.inhouse_modifier
-                # else: same account, no rank data — keep everything as-is
+                # else: same account/no rank data, or a manual seed is locked in
 
             # Now that we've used previous_riot_puuid, clear it
             player.previous_riot_puuid = None
@@ -517,9 +519,11 @@ class LinkingCog(commands.Cog):
                         inhouse_modifier=0,
                         games_played=0,
                     ))
-                elif seed_from_data or account_changed:
+                elif (seed_from_data or account_changed) and not player.manual_seed:
                     # Re-seed from current rank/past on any re-link (not just an
                     # account swap), preserving the inhouse_modifier (W/L).
+                    # Skipped when an admin has locked in a manual seed
+                    # (/set-seed) — only /refresh-seed clears that.
                     existing_rating.base_seed = seed_elo
                     existing_rating.elo = existing_rating.base_seed + existing_rating.inhouse_modifier
             player.previous_riot_puuid = None

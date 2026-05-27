@@ -60,6 +60,38 @@ def upcoming_recruit_thursdays(
     return out
 
 
+# Allorim is held out of the game unless he's needed to field a full 10 — i.e.
+# he only plays when there are exactly 10 signups and there's no one else to
+# bench. Matched on the Riot account (game name + tagline) so it tracks the
+# person regardless of Discord handle changes.
+ALLORIM_GAME_NAME = "allorim"
+ALLORIM_TAG_LINE = "na1"
+
+
+def _is_allorim(player: Optional[Player]) -> bool:
+    return (
+        player is not None
+        and (player.riot_game_name or "").lower() == ALLORIM_GAME_NAME
+        and (player.riot_tag_line or "").lower() == ALLORIM_TAG_LINE
+    )
+
+
+def _select_playing(
+    playing_signups: list[Signup], players_by_id: dict[int, Player]
+) -> list[Signup]:
+    """Pick the (up to 10) signups to actually matchmake, in signup order.
+
+    Standard rule is first-10-by-signup-time, with one override: Allorim is
+    benched whenever there are 10 or more other players to field a game from.
+    He's only pulled in when removing him would drop the count below 10.
+    """
+    ordered = sorted(playing_signups, key=lambda s: s.signed_up_at)
+    others = [s for s in ordered if not _is_allorim(players_by_id.get(s.discord_id))]
+    allorim = [s for s in ordered if _is_allorim(players_by_id.get(s.discord_id))]
+    pool = others if len(others) >= 10 else others + allorim
+    return pool[:10]
+
+
 # =============================================================================
 # Public RSVP buttons (Playing / Not Playing / Commentator)
 # =============================================================================
@@ -634,8 +666,14 @@ class RecruitmentCog(commands.Cog):
                 )
                 return
 
-            # First 10 by signup time
-            ordered = sorted(playing_signups, key=lambda s: s.signed_up_at)[:10]
+            # Pick the 10 to matchmake (benches Allorim unless he's needed for 10).
+            ids = [s.discord_id for s in playing_signups]
+            players_by_id = {
+                p.discord_id: p for p in (await db.execute(
+                    select(Player).where(Player.discord_id.in_(ids))
+                )).scalars().all()
+            }
+            ordered = _select_playing(playing_signups, players_by_id)
             player_inputs = []
             for su in ordered:
                 ratings = (await db.execute(
@@ -838,19 +876,31 @@ class RecruitmentCog(commands.Cog):
         )
 
     @app_commands.command(name="match-preview", description="(admin) Show what teams would be generated right now.")
-    async def match_preview(self, interaction: discord.Interaction):
+    @app_commands.describe(
+        session_id="Session ID (from the recruitment footer). Defaults to the soonest active session."
+    )
+    async def match_preview(self, interaction: discord.Interaction, session_id: Optional[int] = None):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("League Admin only.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         async with get_session() as db:
-            session = (await db.execute(
-                select(InhouseSession).where(InhouseSession.status == "recruiting")
-                .order_by(InhouseSession.game_date.asc())
-            )).scalars().first()
-            if session is None:
-                await interaction.followup.send("No active recruiting session.", ephemeral=True)
-                return
+            if session_id is not None:
+                session = await db.get(InhouseSession, session_id)
+                if session is None:
+                    await interaction.followup.send(f"Session #{session_id} not found.", ephemeral=True)
+                    return
+            else:
+                session = (await db.execute(
+                    select(InhouseSession).where(InhouseSession.status == "recruiting")
+                    .order_by(InhouseSession.game_date.asc())
+                )).scalars().first()
+                if session is None:
+                    await interaction.followup.send(
+                        "No active recruiting session. Pass a `session_id` to preview a specific one.",
+                        ephemeral=True,
+                    )
+                    return
             playing_signups = (await db.execute(
                 select(Signup)
                 .where(Signup.session_id == session.id)
@@ -861,7 +911,13 @@ class RecruitmentCog(commands.Cog):
                     f"Only {len(playing_signups)} playing signups, need 10.", ephemeral=True
                 )
                 return
-            ordered = sorted(playing_signups, key=lambda s: s.signed_up_at)[:10]
+            ids = [s.discord_id for s in playing_signups]
+            players_by_id = {
+                p.discord_id: p for p in (await db.execute(
+                    select(Player).where(Player.discord_id.in_(ids))
+                )).scalars().all()
+            }
+            ordered = _select_playing(playing_signups, players_by_id)
             player_inputs = []
             for su in ordered:
                 ratings = (await db.execute(
@@ -930,7 +986,13 @@ class RecruitmentCog(commands.Cog):
                     ephemeral=True,
                 )
                 return
-            ordered = sorted(playing, key=lambda s: s.signed_up_at)[:10]
+            ids = [s.discord_id for s in playing]
+            players_by_id = {
+                p.discord_id: p for p in (await db.execute(
+                    select(Player).where(Player.discord_id.in_(ids))
+                )).scalars().all()
+            }
+            ordered = _select_playing(playing, players_by_id)
             player_inputs = []
             names: dict[int, str] = {}
             for su in ordered:
@@ -945,7 +1007,7 @@ class RecruitmentCog(commands.Cog):
                     preferred_roles=su.role_list,
                     ratings=ratings_dict,
                 ))
-                p = await db.get(Player, su.discord_id)
+                p = players_by_id.get(su.discord_id)
                 names[su.discord_id] = p.riot_game_name if p and p.riot_game_name else f"<@{su.discord_id}>"
 
         # Best-effort balanced seating as a starting point; fall back to arbitrary

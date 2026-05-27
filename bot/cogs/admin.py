@@ -975,14 +975,65 @@ class AdminCog(commands.Cog):
         await interaction.followup.send(
             f"✅ Synced {result['updated']} players · "
             f"updated base_seed on {result['rows_updated']} rating rows · "
+            f"{result['skipped']} manually-seeded (skipped) · "
             f"{result['errors']} errors",
             ephemeral=True,
         )
 
+    async def _refresh_base_seed_for_player(self, db, player: Player) -> int:
+        """Re-derive one player's base_seed from current Riot rank (or OP.GG past
+        season), updating all their rating rows in place. The caller commits.
+
+        Returns the number of rating rows written; 0 means no current or past
+        rank was found anywhere, in which case base_seed is left as-is. Sets
+        riot_last_synced regardless. Does NOT consult manual_seed — callers
+        decide whether a player should be refreshed.
+        """
+        rank = await self.riot.get_solo_rank(player.riot_puuid)
+        past = None
+        if rank is None:
+            past = await self.opgg.get_past_season_rank(
+                player.riot_game_name, player.riot_tag_line, player.region
+            )
+
+        if rank:
+            player.solo_tier = rank.tier
+            player.solo_rank = rank.rank
+            player.solo_lp = rank.league_points
+            new_seed = seed_from_rank(rank.tier, rank.rank)
+        elif past:
+            new_seed = seed_from_past_season(past.tier, past.division, past.seasons_elapsed)
+        else:
+            new_seed = None  # no current or past rank anywhere; leave base_seed as-is
+
+        player.riot_last_synced = datetime.utcnow()
+        if new_seed is None:
+            return 0
+
+        player.last_synced_seed_elo = new_seed
+        rows = 0
+        for role in [*ROLES, INHOUSE_ROLE]:
+            r = await db.get(Rating, (player.discord_id, role))
+            if r is None:
+                db.add(Rating(
+                    discord_id=player.discord_id,
+                    role=role,
+                    elo=new_seed,
+                    base_seed=new_seed,
+                    inhouse_modifier=0,
+                    games_played=0,
+                ))
+            else:
+                r.base_seed = new_seed
+                r.elo = r.base_seed + r.inhouse_modifier
+            rows += 1
+        return rows
+
     async def _refresh_all_base_seeds(self) -> dict:
         """Refresh base_seed for every linked player from current Riot rank.
-        Used by both /sync-ranks (manual) and the Monday close job.
-        Returns counts dict for logging.
+        Used by both /sync-ranks (manual) and the Monday close job. Players with
+        a manual seed (set via /set-seed) are skipped so an admin override isn't
+        clobbered. Returns counts dict for logging.
         """
         async with get_session() as db:
             players = (await db.execute(
@@ -994,55 +1045,21 @@ class AdminCog(commands.Cog):
             updated = 0
             errors = 0
             rows_updated = 0
+            skipped = 0
             for player in players:
+                if player.manual_seed:
+                    skipped += 1
+                    continue
                 try:
-                    rank = await self.riot.get_solo_rank(player.riot_puuid)
-                    past = None
-                    if rank is None:
-                        past = await self.opgg.get_past_season_rank(
-                            player.riot_game_name, player.riot_tag_line, player.region
-                        )
-
-                    if rank:
-                        player.solo_tier = rank.tier
-                        player.solo_rank = rank.rank
-                        player.solo_lp = rank.league_points
-                        new_seed = seed_from_rank(rank.tier, rank.rank)
-                    elif past:
-                        new_seed = seed_from_past_season(past.tier, past.division, past.seasons_elapsed)
-                    else:
-                        new_seed = None  # no current or past rank anywhere; leave base_seed as-is
-
-                    player.riot_last_synced = datetime.utcnow()
+                    rows_updated += await self._refresh_base_seed_for_player(db, player)
                     updated += 1
-
-                    if new_seed is None:
-                        continue
-
-                    player.last_synced_seed_elo = new_seed
-                    for role in [*ROLES, INHOUSE_ROLE]:
-                        r = await db.get(Rating, (player.discord_id, role))
-                        if r is None:
-                            db.add(Rating(
-                                discord_id=player.discord_id,
-                                role=role,
-                                elo=new_seed,
-                                base_seed=new_seed,
-                                inhouse_modifier=0,
-                                games_played=0,
-                            ))
-                            rows_updated += 1
-                        else:
-                            r.base_seed = new_seed
-                            r.elo = r.base_seed + r.inhouse_modifier
-                            rows_updated += 1
                 except RiotAuthError:
                     raise
                 except Exception:
                     log.exception("Failed to sync %s", player.discord_id)
                     errors += 1
             await db.commit()
-        return {"updated": updated, "rows_updated": rows_updated, "errors": errors}
+        return {"updated": updated, "rows_updated": rows_updated, "errors": errors, "skipped": skipped}
 
     @app_commands.command(
         name="reseed-all",
@@ -1071,10 +1088,110 @@ class AdminCog(commands.Cog):
             f"✅ Reseed complete · "
             f"refreshed base_seed for {result['updated']} players "
             f"({result['rows_updated']} rating rows) · "
+            f"{result['skipped']} manually-seeded (skipped) · "
             f"inhouse_modifier preserved · "
             f"{result['errors']} errors",
             ephemeral=True,
         )
+
+    @app_commands.command(
+        name="set-seed",
+        description="(admin) Manually set a player's base_seed. Locks it against auto-refresh until /refresh-seed.",
+    )
+    @app_commands.describe(
+        user="The player whose base_seed to set",
+        seed="The base_seed elo value to apply to every role row",
+    )
+    async def set_seed(self, interaction: discord.Interaction, user: discord.Member, seed: int):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        async with get_session() as db:
+            player = await db.get(Player, user.id)
+            if player is None:
+                await interaction.followup.send(
+                    f"{user.mention} has no player record — they need to /link first.",
+                    ephemeral=True,
+                )
+                return
+            # Apply to all role rows (creating any that are missing), keeping each
+            # row's inhouse_modifier so displayed elo = manual seed + W/L.
+            for role in [*ROLES, INHOUSE_ROLE]:
+                r = await db.get(Rating, (user.id, role))
+                if r is None:
+                    db.add(Rating(
+                        discord_id=user.id,
+                        role=role,
+                        elo=seed,
+                        base_seed=seed,
+                        inhouse_modifier=0,
+                        games_played=0,
+                    ))
+                else:
+                    r.base_seed = seed
+                    r.elo = r.base_seed + r.inhouse_modifier
+            player.manual_seed = True
+            player.last_synced_seed_elo = seed
+            await db.commit()
+        log.info("set-seed by %s: %s base_seed -> %s (locked)", interaction.user.id, user.id, seed)
+        await interaction.followup.send(
+            f"🔒 Set {user.mention}'s base_seed to **{seed}** on all roles. "
+            f"It's now locked against the weekly refresh, /sync-ranks, /reseed-all, and re-links. "
+            f"Run `/refresh-seed user:{user.display_name}` to unlock and re-derive from rank.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="refresh-seed",
+        description="(admin) Clear a player's manual seed and re-derive base_seed from their current Riot rank.",
+    )
+    @app_commands.describe(user="The player whose manual seed to clear and refresh")
+    async def refresh_seed(self, interaction: discord.Interaction, user: discord.Member):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        async with get_session() as db:
+            player = await db.get(Player, user.id)
+            if player is None:
+                await interaction.followup.send(
+                    f"{user.mention} has no player record — nothing to refresh.",
+                    ephemeral=True,
+                )
+                return
+            was_manual = player.manual_seed
+            player.manual_seed = False
+            if player.riot_puuid is None:
+                # No linked Riot account to pull a rank from. Just unlock; the
+                # existing base_seed stays until they link and get refreshed.
+                await db.commit()
+                await interaction.followup.send(
+                    f"🔓 Cleared manual seed for {user.mention}, but they have no linked Riot "
+                    f"account so base_seed can't be re-derived — it stays as-is until they /link.",
+                    ephemeral=True,
+                )
+                return
+            try:
+                rows = await self._refresh_base_seed_for_player(db, player)
+            except RiotAuthError:
+                await interaction.followup.send("❌ Riot API key rejected.", ephemeral=True)
+                return
+            await db.commit()
+        log.info("refresh-seed by %s: %s (was_manual=%s, rows=%s)", interaction.user.id, user.id, was_manual, rows)
+        unlock = "🔓 Cleared manual seed for" if was_manual else "🔄 Refreshed"
+        if rows:
+            await interaction.followup.send(
+                f"{unlock} {user.mention} and re-derived base_seed from their current rank "
+                f"({rows} rating rows updated).",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                f"{unlock} {user.mention}, but no current or past rank was found — base_seed left "
+                f"unchanged. They'll be picked up by the next refresh once a rank is available.",
+                ephemeral=True,
+            )
 
     @app_commands.command(
         name="clear-matches",

@@ -16,7 +16,10 @@ enumerate exhaustively in milliseconds:
         balance_score = |team1_skill - team2_skill|     (lower is better)
         role_penalty  = sum over players of (0 if got primary role else penalty)
         total_cost    = balance_score + role_weight * role_penalty
-  4. Return the lowest-cost solution.
+  4. Return the best solution, ranked lexicographically: fewest off-role
+     assignments first, then best balance. A player is only put off their
+     preferred role when no lower-penalty split is legal — i.e. when required
+     for role coverage, never merely to tighten team balance.
 
 Skill is per-role conservative TrueSkill (mu - 3*sigma). A player's skill
 contribution depends on which role they're assigned to, since they have a
@@ -141,7 +144,8 @@ def make_top_matches(
     role_weight: float = 3.0,
     min_diff: int = 2,
 ) -> list[MatchProposal]:
-    """Generate the top-N most-balanced matches, with diversity enforcement.
+    """Generate the top-N matches, ranked off-role-first then by balance, with
+    diversity enforcement.
 
     Diversity rule: each returned proposal must differ from every previously
     returned proposal by at least `min_diff` player-team-swaps. Two proposals
@@ -190,7 +194,11 @@ def make_top_matches(
             cost=cost,
         ))
 
-    all_proposals.sort(key=lambda p: p.cost)
+    # Off-role only when required: rank by role penalty first, then balance.
+    # A more-balanced split is never preferred if it would put an extra player
+    # off their preferred role. (cost is still computed above for reference but
+    # no longer drives selection.)
+    all_proposals.sort(key=lambda p: (p.role_penalty, p.balance_diff))
 
     # Greedy diversity filter: take the lowest-cost option, then the next
     # option that differs by at least min_diff swaps from ALL already-chosen.

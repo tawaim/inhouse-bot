@@ -39,6 +39,10 @@ class Player(Base):
     # The seed elo computed from the player's rank at last sync. Used to apply
     # a delta to inhouse elo when the player ranks up/down in solo queue
     # between syncs.
+    manual_seed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # When True, base_seed was set by an admin via /set-seed and must NOT be
+    # overwritten by the weekly rank refresh, /sync-ranks, /reseed-all, or a
+    # re-link. Cleared (and base_seed re-derived from rank) by /refresh-seed.
     previous_riot_puuid: Mapped[Optional[str]] = mapped_column(String(128))
     # Tracks the last-known PUUID across unlinks. Used to detect when a re-link
     # is a different account (-> reseed elo) vs the same one (-> keep elo).
