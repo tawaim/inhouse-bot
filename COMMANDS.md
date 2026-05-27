@@ -265,6 +265,9 @@ When validated, the match is created and posted publicly to the recruit channel.
 
 Targets the soonest active session by default; pass `session_id` (from the recruitment post footer) or `game_date` to target a specific night.
 
+**Optional argument:**
+- `create_channels` *(default false)* — if true, immediately builds the per-team roles + private channels for the new match (same as running `/match-channels` on it afterward). Requires a category set via `/set-match-category`; if none is set it still creates the match and just tells you to configure one. The result message reports the channel outcome alongside the match confirmation.
+
 ### `/match-roster [match_id]` (admin)
 
 Prints an existing match's roster in the exact format `/manual-match` and `/pickup-series` accept, inside an ephemeral code block — so you don't have to retype @-mentions when editing teams. Defaults to the most recent match if `match_id` is omitted.

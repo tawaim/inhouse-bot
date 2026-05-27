@@ -4,13 +4,14 @@ Drives the real resolve_name_block against a temp SQLite DB and a fake guild
 whose get_member returns lightweight stand-ins (display_name / name / nick /
 global_name) — no Discord gateway needed.
 """
+import json
 import types
 
 from sqlalchemy import select
 
-from bot.cogs.admin import resolve_name_block
+from bot.cogs.admin import AdminCog, resolve_name_block
 from bot.config import Config
-from bot.db.models import Alias, Player
+from bot.db.models import Alias, GuildConfig, Match, Player
 from bot.db.session import close_db, get_session, init_db
 
 
@@ -46,6 +47,9 @@ class _FakeGuild:
 
     def get_member(self, did):
         return self._members.get(did)
+
+    def get_channel(self, cid):
+        return None  # no category resolvable in these tests
 
 
 async def _seed_players():
@@ -178,6 +182,49 @@ def test_no_match_reported(tmp_path):
             block, notes, _learned = await resolve_name_block(_guild(), "Zzqxywv")
             assert "❌" in block
             assert any("No match" in n for n in notes)
+        finally:
+            await close_db()
+
+    asyncio.run(body())
+
+
+# --- create_channels flag: early returns of the shared channel builder ---
+
+def test_build_channels_match_not_found(tmp_path):
+    import asyncio
+
+    async def body():
+        await init_db(_config(str(tmp_path / "h.db")))
+        try:
+            dummy = types.SimpleNamespace()  # method doesn't touch self before these returns
+            result = await AdminCog._build_match_channels(dummy, _guild(), 1, match_id=999)
+            assert "not found" in result
+        finally:
+            await close_db()
+
+    asyncio.run(body())
+
+
+def test_build_channels_no_category_configured(tmp_path):
+    import asyncio
+
+    async def body():
+        await init_db(_config(str(tmp_path / "i.db")))
+        try:
+            async with get_session() as db:
+                db.add(GuildConfig(guild_id=1, match_category_id=None))
+                m = Match(
+                    session_id=None,
+                    team1_json=json.dumps({"TOP": 1}),
+                    team2_json=json.dumps({"TOP": 2}),
+                )
+                db.add(m)
+                await db.commit()
+                await db.refresh(m)
+                mid = m.id
+            dummy = types.SimpleNamespace()
+            result = await AdminCog._build_match_channels(dummy, _guild(), 1, match_id=mid)
+            assert "No match category configured" in result
         finally:
             await close_db()
 

@@ -212,10 +212,16 @@ class ManualMatchModal(discord.ui.Modal, title="Manual Match Entry"):
         session_id: Optional[int],
         edit_match_id: Optional[int] = None,
         prefill: Optional[str] = None,
+        create_channels: bool = False,
+        channels_builder=None,
     ):
         super().__init__()
         self.session_id = session_id
         self.edit_match_id = edit_match_id  # when set, UPDATE this match instead of creating one
+        # When True, build the per-team roles + private channels right after the
+        # match is saved. channels_builder is the cog's _build_match_channels.
+        self.create_channels = create_channels
+        self._channels_builder = channels_builder
         if prefill:
             self.roster.default = prefill   # pre-fills the text box for in-place editing
 
@@ -305,11 +311,17 @@ class ManualMatchModal(discord.ui.Modal, title="Manual Match Entry"):
                 await channel.send(content=f"🔒 Teams ({verb}):", embed=embed)
 
         posted = " Posted to recruit channel." if channel_id else ""
-        await interaction.followup.send(
+        msg = (
             f"✅ Match {match_id} {verb} with manual roster.{posted}\n"
-            f"Report the result with `/report` or `/report-manual` when games are done.",
-            ephemeral=True,
+            f"Report the result with `/report` or `/report-manual` when games are done."
         )
+        # Optional one-shot: build the per-team roles + channels for this match.
+        if self.create_channels and self._channels_builder and interaction.guild:
+            channel_summary = await self._channels_builder(
+                interaction.guild, interaction.guild_id, match_id
+            )
+            msg += f"\n\n{channel_summary}"
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 class EditRosterView(discord.ui.View):
@@ -877,24 +889,18 @@ class AdminCog(commands.Cog):
         miss = f", {missing} not in server" if missing else ""
         return f"• {channel.mention} ({role.mention}) — {len(added)} added{miss}"
 
-    @app_commands.command(
-        name="match-channels",
-        description="(admin) Create private per-team roles + channels for a match.",
-    )
-    @app_commands.describe(match_id="The match ID to build team channels for")
-    async def match_channels(self, interaction: discord.Interaction, match_id: int):
-        if not await self._is_admin(interaction):
-            await interaction.response.send_message("League Admin only.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        guild = interaction.guild
-
+    async def _build_match_channels(
+        self, guild: discord.Guild, guild_id: int, match_id: int
+    ) -> str:
+        """Create-or-reuse the per-team roles + private channels for a match and
+        return a human-readable summary (success, or the reason it couldn't).
+        Shared by /match-channels and /manual-match's create_channels flag — does
+        not send any message itself, so callers control the response."""
         async with get_session() as db:
             match = await db.get(Match, match_id)
             if match is None:
-                await interaction.followup.send(f"Match {match_id} not found.", ephemeral=True)
-                return
-            cfg = await db.get(GuildConfig, interaction.guild_id)
+                return f"❌ Match {match_id} not found — channels not created."
+            cfg = await db.get(GuildConfig, guild_id)
             team1 = {k: int(v) for k, v in json.loads(match.team1_json).items()}
             team2 = {k: int(v) for k, v in json.loads(match.team2_json).items()}
 
@@ -903,10 +909,10 @@ class AdminCog(commands.Cog):
             if cfg and cfg.match_category_id else None
         )
         if not isinstance(category, discord.CategoryChannel):
-            await interaction.followup.send(
-                "No match category configured. Run `/set-match-category` first.", ephemeral=True
+            return (
+                "⚠️ No match category configured — run `/set-match-category`, "
+                f"then `/match-channels match_id:{match_id}`."
             )
-            return
 
         admin_role = discord.utils.get(guild.roles, name=self.config.admin_role_name)
         try:
@@ -918,15 +924,26 @@ class AdminCog(commands.Cog):
                     )
                 )
         except discord.Forbidden:
-            await interaction.followup.send(
+            return (
                 "❌ I lack permission to create roles/channels. Grant me **Manage Roles** + "
-                "**Manage Channels**, and make sure my role sits above the team roles.",
-                ephemeral=True,
+                "**Manage Channels**, and make sure my role sits above the team roles."
             )
+        return f"✅ Match {match_id} team channels ready:\n" + "\n".join(lines)
+
+    @app_commands.command(
+        name="match-channels",
+        description="(admin) Create private per-team roles + channels for a match.",
+    )
+    @app_commands.describe(match_id="The match ID to build team channels for")
+    async def match_channels(self, interaction: discord.Interaction, match_id: int):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
             return
-        await interaction.followup.send(
-            f"✅ Match {match_id} team channels ready:\n" + "\n".join(lines), ephemeral=True
+        await interaction.response.defer(ephemeral=True)
+        summary = await self._build_match_channels(
+            interaction.guild, interaction.guild_id, match_id
         )
+        await interaction.followup.send(summary, ephemeral=True)
 
     @app_commands.command(
         name="clear-match-channels",
@@ -1896,12 +1913,14 @@ class AdminCog(commands.Cog):
     @app_commands.describe(
         session_id="Session ID (from the recruitment post footer). Takes priority over game_date.",
         game_date="Game date YYYY-MM-DD (must be a Thursday). Alternative to session_id.",
+        create_channels="Also create the per-team roles + private channels for this match.",
     )
     async def manual_match(
         self,
         interaction: discord.Interaction,
         session_id: Optional[int] = None,
         game_date: Optional[str] = None,
+        create_channels: bool = False,
     ):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("League Admin only.", ephemeral=True)
@@ -1954,7 +1973,13 @@ class AdminCog(commands.Cog):
                     )
                     return
 
-        await interaction.response.send_modal(ManualMatchModal(session.id))
+        await interaction.response.send_modal(
+            ManualMatchModal(
+                session.id,
+                create_channels=create_channels,
+                channels_builder=self._build_match_channels,
+            )
+        )
 
     @app_commands.command(
         name="pickup-series",
