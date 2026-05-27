@@ -214,6 +214,24 @@ class ProposalSet(Base):
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
 
+class Alias(Base):
+    """A free-text name (as it appears in screenshots / signup lists) mapped to a
+    Discord user, so /resolve-names can turn a list of informal names like
+    'Robo' or 'carter_k' into the <@id> mention block /manual-match accepts.
+
+    Match key is `alias_norm` (lowercased/trimmed) so lookups are case-insensitive
+    and one normalized name resolves to exactly one player; `alias` keeps the
+    original casing for display. Populated automatically when /resolve-names makes
+    a confident exact match, or manually via /set-alias.
+    """
+    __tablename__ = "aliases"
+
+    alias_norm: Mapped[str] = mapped_column(String(64), primary_key=True)
+    discord_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    alias: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class GuildConfig(Base):
     """Per-guild channel configuration set via /set-channel."""
     __tablename__ = "guild_config"

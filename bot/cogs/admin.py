@@ -1,9 +1,11 @@
 """Admin commands: result reporting, channel config, rank syncing."""
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import re
+from collections import defaultdict
 from datetime import datetime
 from typing import Literal, Optional
 
@@ -13,7 +15,7 @@ from discord.ext import commands
 from sqlalchemy import delete, func, select, update
 
 from bot.config import Config, ROLES
-from bot.db.models import GuildConfig, Match, MatchPerformance, Player, ProposalSet, Rating, Session as InhouseSession, Signup
+from bot.db.models import Alias, GuildConfig, Match, MatchPerformance, Player, ProposalSet, Rating, Session as InhouseSession, Signup
 from bot.db.session import get_session
 from bot.services.elo import (
     DEFAULT_ELO,
@@ -447,6 +449,202 @@ class PickupSeriesModal(discord.ui.Modal, title="Pickup Series Result"):
         )
 
 
+# =============================================================================
+# Name resolution (/resolve-names, /set-alias) — turn informal names from a
+# signup/screenshot into the <@id> block /manual-match accepts.
+# =============================================================================
+
+# A line that's just a team header ("TEAM 1", "T2") — passed through untouched.
+_TEAM_HEADER_RE = re.compile(r"^(team\s*\d+|t\d+)$", re.IGNORECASE)
+# Below this difflib ratio we don't even suggest a fuzzy match.
+_FUZZY_CUTOFF = 0.72
+
+
+def _norm_name(s: str) -> str:
+    """The match key: lowercased, trimmed, whitespace-collapsed, leading @ dropped."""
+    s = s.strip().lstrip("@").strip()
+    s = re.sub(r"\s+", " ", s)
+    return s.lower()
+
+
+def _name_variants(s: str) -> set[str]:
+    """Normalized forms accepted as an exact match: the full name and the name
+    with any '(...)' suffix stripped — so 'kaari (inhouse arena champ)' still
+    matches a pasted 'kaari'."""
+    out: set[str] = set()
+    full = _norm_name(s)
+    if full:
+        out.add(full)
+    stripped = _norm_name(re.sub(r"\(.*?\)", "", s))
+    if stripped:
+        out.add(stripped)
+    return out
+
+
+async def _build_candidate_index(
+    guild: discord.Guild, db
+) -> tuple[dict[str, set[int]], dict[int, str]]:
+    """Build {normalized identity string -> {discord_ids}} over all linked+approved
+    players (matching on Riot game name + Discord display name / username / nick),
+    plus a {discord_id -> display label} map. Only linked players are candidates,
+    since they're the only ones valid in /manual-match."""
+    rows = (
+        await db.execute(
+            select(Player).where(
+                Player.link_status == "approved", Player.riot_puuid.isnot(None)
+            )
+        )
+    ).scalars().all()
+
+    index: dict[str, set[int]] = defaultdict(set)
+    labels: dict[int, str] = {}
+    for p in rows:
+        member = guild.get_member(p.discord_id)
+        strings = [p.riot_game_name]
+        if member is not None:
+            strings += [member.display_name, member.name, member.global_name, member.nick]
+        for s in strings:
+            if not s:
+                continue
+            for v in _name_variants(s):
+                index[v].add(p.discord_id)
+        labels[p.discord_id] = (
+            member.display_name if member is not None else (p.riot_game_name or str(p.discord_id))
+        )
+    return index, labels
+
+
+async def resolve_name_block(guild: discord.Guild, raw: str) -> tuple[str, list[str], int]:
+    """Rewrite a pasted block of plain names into <@id> mentions.
+
+    Lines shaped like 'ROLE: name' keep the 'ROLE:' prefix; team headers pass
+    through; any other line is treated as a bare name. Confident, unambiguous
+    exact matches are saved as aliases (so they're instant next time). Returns
+    (rewritten_block, notes, learned_alias_count)."""
+    async with get_session() as db:
+        alias_map = {
+            a.alias_norm: a.discord_id
+            for a in (await db.execute(select(Alias))).scalars().all()
+        }
+        index, labels = await _build_candidate_index(guild, db)
+        keys = list(index.keys())
+
+        out_lines: list[str] = []
+        notes: list[str] = []
+        learned = 0
+
+        def label(i: int) -> str:
+            return f"{labels.get(i, i)} (<@{i}>)"
+
+        for raw_line in raw.splitlines():
+            line = raw_line.strip()
+            if not line:
+                out_lines.append("")
+                continue
+            if _TEAM_HEADER_RE.match(line):
+                out_lines.append(line)
+                continue
+            m = _ROLE_LINE_RE.match(line)
+            if m:
+                prefix, namepart = f"{m.group(1)}: ", m.group(2)
+            else:
+                prefix, namepart = "", line
+            name = namepart.strip()
+            n = _norm_name(name)
+
+            # 1. Known alias — exact, trusted.
+            if n in alias_map:
+                out_lines.append(f"{prefix}<@{alias_map[n]}>")
+                continue
+            # 2. Exact match on a live identity string.
+            if n in index:
+                ids = index[n]
+                if len(ids) == 1:
+                    did = next(iter(ids))
+                    out_lines.append(f"{prefix}<@{did}>")
+                    db.add(Alias(alias_norm=n, discord_id=did, alias=name))
+                    alias_map[n] = did
+                    learned += 1
+                    continue
+                out_lines.append(f"{prefix}⚠️ {name}")
+                notes.append(
+                    f"❓ **{name}** is ambiguous — matches {', '.join(label(i) for i in ids)}. "
+                    f"Pick one with `/set-alias`."
+                )
+                continue
+            # 3. Fuzzy fallback — suggested, never auto-saved.
+            cand_ids: list[int] = []
+            for k in difflib.get_close_matches(n, keys, n=5, cutoff=_FUZZY_CUTOFF):
+                for i in index[k]:
+                    if i not in cand_ids:
+                        cand_ids.append(i)
+            if len(cand_ids) == 1:
+                did = cand_ids[0]
+                out_lines.append(f"{prefix}<@{did}>  ← guess, verify")
+                notes.append(
+                    f"🤔 Guessed **{name}** → {label(did)} (not saved). Fix with `/set-alias` if wrong."
+                )
+                continue
+            if len(cand_ids) > 1:
+                out_lines.append(f"{prefix}⚠️ {name}")
+                notes.append(
+                    f"🤔 **{name}** is close to {', '.join(label(i) for i in cand_ids[:5])}. "
+                    f"Disambiguate with `/set-alias`."
+                )
+                continue
+            # 4. Nothing.
+            out_lines.append(f"{prefix}❌ {name}")
+            notes.append(
+                f"❌ No match for **{name}** — are they `/link`'d? "
+                f"Map them with `/set-alias member:@them alias:{name}`."
+            )
+
+        if learned:
+            await db.commit()
+
+    return "\n".join(out_lines), notes, learned
+
+
+class ResolveNamesModal(discord.ui.Modal, title="Resolve names → mentions"):
+    """Paste a list of plain names (or a full roster with role labels); returns the
+    same block with each name swapped for its <@id> mention, ready for /manual-match."""
+
+    names = discord.ui.TextInput(
+        label="Names (one per line; 'ROLE: name' ok)",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=2000,
+        placeholder=(
+            "Robo\ncarter_k\nkaari\n\n"
+            "…or a full roster:\n"
+            "TEAM 1\nTOP: kaari\nJUNGLE: Max\n..."
+        ),
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        if guild is None:
+            await interaction.followup.send("Run this in a server.", ephemeral=True)
+            return
+        # Populate the member cache so we can match on Discord display names/nicks.
+        try:
+            if not guild.chunked:
+                await guild.chunk()
+        except Exception:
+            log.warning("resolve-names: guild chunk failed; using cache", exc_info=True)
+
+        block, notes, learned = await resolve_name_block(guild, self.names.value)
+        msg = f"**Resolved** — paste into `/manual-match`:\n```\n{block}\n```"
+        if learned:
+            msg += f"\n🧠 Learned {learned} new alias(es)."
+        if notes:
+            msg += "\n\n" + "\n".join(notes[:12])
+        await interaction.followup.send(
+            msg[:1950], ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+        )
+
+
 class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot, config: Config, riot: RiotClient, opgg: OpggClient):
         self.bot = bot
@@ -539,6 +737,93 @@ class AdminCog(commands.Cog):
         )
         await interaction.response.send_message(
             f"✅ Match channels will be created under **{category.name}**.{warn}", ephemeral=True
+        )
+
+    @app_commands.command(
+        name="resolve-names",
+        description="(admin) Turn a list of plain names into a /manual-match mention block.",
+    )
+    async def resolve_names(self, interaction: discord.Interaction):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        await interaction.response.send_modal(ResolveNamesModal())
+
+    @app_commands.command(
+        name="set-alias",
+        description="(admin) Teach the bot that a name maps to a Discord member.",
+    )
+    @app_commands.describe(
+        member="The Discord member",
+        alias="The name as it appears in screenshots / signups (e.g. 'Robo')",
+    )
+    async def set_alias(
+        self, interaction: discord.Interaction, member: discord.Member, alias: str
+    ):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        norm = _norm_name(alias)
+        if not norm:
+            await interaction.response.send_message("❌ Alias can't be empty.", ephemeral=True)
+            return
+        async with get_session() as db:
+            row = await db.get(Alias, norm)
+            if row is None:
+                db.add(Alias(alias_norm=norm, discord_id=member.id, alias=alias.strip()))
+                verb = "Added"
+            else:
+                row.discord_id = member.id
+                row.alias = alias.strip()
+                verb = "Updated"
+            await db.commit()
+        await interaction.response.send_message(
+            f"✅ {verb} alias **{alias.strip()}** → {member.mention}.",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @app_commands.command(name="aliases", description="(admin) List stored name aliases.")
+    @app_commands.describe(member="Optionally filter to one member's aliases")
+    async def aliases(
+        self, interaction: discord.Interaction, member: Optional[discord.Member] = None
+    ):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        async with get_session() as db:
+            q = select(Alias).order_by(Alias.alias_norm)
+            if member is not None:
+                q = q.where(Alias.discord_id == member.id)
+            rows = (await db.execute(q)).scalars().all()
+        if not rows:
+            await interaction.response.send_message("No aliases stored yet.", ephemeral=True)
+            return
+        by_user: dict[int, list[str]] = defaultdict(list)
+        for a in rows:
+            by_user[a.discord_id].append(a.alias)
+        lines = [f"<@{did}> — {', '.join(sorted(al))}" for did, al in by_user.items()]
+        body = "**Stored aliases:**\n" + "\n".join(lines)
+        await interaction.response.send_message(
+            body[:1950], ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+        )
+
+    @app_commands.command(name="remove-alias", description="(admin) Delete a stored name alias.")
+    @app_commands.describe(alias="The alias text to remove")
+    async def remove_alias(self, interaction: discord.Interaction, alias: str):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        async with get_session() as db:
+            row = await db.get(Alias, _norm_name(alias))
+            if row is None:
+                await interaction.response.send_message(
+                    f"No alias **{alias.strip()}** found.", ephemeral=True
+                )
+                return
+            await db.delete(row)
+            await db.commit()
+        await interaction.response.send_message(
+            f"🗑️ Removed alias **{alias.strip()}**.", ephemeral=True
         )
 
     async def _create_team_channel(

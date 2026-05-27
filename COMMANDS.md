@@ -202,9 +202,38 @@ Useful when:
 
 The same uniqueness checks apply (one Riot account can't be linked to two Discord users).
 
+### `/resolve-names` (admin)
+
+Turns a list of **plain names** (like the ones in a signup screenshot — `Robo`, `carter_k`, `JR`) into the `<@id>` mention block that `/manual-match` requires. Discord popups have no @-autocomplete, so this is how you avoid hand-typing mentions.
+
+Opens a popup with one text box. Paste either:
+- a bare list, one name per line, **or**
+- a full roster with role labels (`TOP: kaari`, `TEAM 1`, …) — headers and `ROLE:` prefixes are preserved.
+
+For each name it tries, in order:
+1. a stored **alias** (exact, trusted),
+2. an **exact** match against linked players' Riot name / Discord display name / username / nick (case-insensitive; a `(...)` suffix on a display name is ignored, so `kaari` matches `kaari (inhouse arena champ)`),
+3. a **fuzzy** guess — emitted but flagged `← guess, verify` and **never** saved automatically.
+
+It replies (ephemerally) with the rewritten block to copy into `/manual-match`, plus notes for anything ambiguous, guessed, or unmatched. **Confident exact matches are saved as aliases automatically**, so they're instant next time. Only linked-and-approved players are candidates (they're the only ones valid in a match).
+
+### `/set-alias <member> <alias>` (admin)
+
+Teach the bot that a name maps to a Discord member — e.g. `/set-alias member:@RobertX alias:Robo`. Use this to fix the ambiguous/guessed/unmatched names `/resolve-names` flags. Re-running with an existing alias re-points it.
+
+### `/aliases [member]` (admin)
+
+Lists stored aliases (all, or filtered to one `member`). Ephemeral.
+
+### `/remove-alias <alias>` (admin)
+
+Deletes one stored alias.
+
 ### `/manual-match` (admin)
 
 Override the matchmaker by submitting your own roster. Opens a popup with a multi-line text box.
+
+> **Tip:** Discord popups don't offer @-autocomplete, so type plain names into `/resolve-names` first and paste its `<@id>` output here.
 
 **Format:**
 ```
