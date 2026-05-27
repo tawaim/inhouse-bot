@@ -114,6 +114,30 @@ def test_balance_optimized_across_all_seatings():
     assert proposal.balance_diff == 200.0
 
 
+def test_lane_disparity_takes_priority_over_team_balance():
+    """Priority is even LANES first, even team totals only as a tiebreak. So the
+    chosen comp must minimize lane disparity even if another comp has a smaller
+    overall team-total gap (the smurf-top + feeder-support 'balanced sum' trap)."""
+    import random
+    from bot.services.matchmaking import make_all_matches
+    random.seed(7)
+    roles = ["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]
+    # Role-dependent ratings + full flexibility so seating genuinely matters.
+    players = [PlayerInput(i, ["FILL"], {r: random.randint(800, 1800) for r in roles})
+               for i in range(10)]
+    comps = make_all_matches(players)
+    chosen = make_match(players)
+
+    min_lane = min(p.lane_diff for p in comps)
+    assert chosen.lane_diff == min_lane  # we always land on the most even lanes
+
+    # If the most team-balanced comp has worse lanes, we must NOT have taken it.
+    team_min = min(comps, key=lambda p: p.balance_diff)
+    if team_min.lane_diff > min_lane:
+        assert chosen.lane_diff < team_min.lane_diff
+        assert chosen.balance_diff >= team_min.balance_diff
+
+
 def test_wrong_player_count_raises():
     players = [make_player(i, ["FILL"]) for i in range(9)]
     with pytest.raises(ValueError):

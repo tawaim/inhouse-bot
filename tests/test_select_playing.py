@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
-from bot.cogs.recruitment import _is_allorim, _select_playing
+from bot.cogs.recruitment import _is_allorim, _select_playing, _team_lines
 
 
 def signup(pid: int, order: int):
@@ -69,3 +69,13 @@ def test_no_allorim_is_plain_first_ten():
     sus, players = make_pool(n_others=12, with_allorim=False)
     selected = [s.discord_id for s in _select_playing(sus, players)]
     assert selected == list(range(10))  # first 10 by signup order
+
+
+def test_team_lines_render_top_down():
+    """Rosters always render TOP, JUNGLE, MID, BOT, SUPPORT regardless of the
+    dict's insertion order."""
+    by_role = {"SUPPORT": 5, "MID": 3, "TOP": 1, "BOT": 4, "JUNGLE": 2}
+    out = _team_lines(by_role, emoji=False)
+    roles_in_order = [line.split("**")[1] for line in out.splitlines()]
+    assert roles_in_order == ["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]
+    assert out.splitlines()[0] == "**TOP**: <@1>"

@@ -38,7 +38,14 @@ from sqlalchemy import select
 from bot.config import Config, ROLE_EMOJIS, ROLES
 from bot.db.models import GuildConfig, Match, MatchPerformance, Player, ProposalSet, Rating, Session as InhouseSession, Signup
 from bot.db.session import get_session
-from bot.services.matchmaking import MatchProposal, PlayerInput, TeamAssignment, make_match, make_top_matches
+from bot.services.matchmaking import (
+    MatchProposal,
+    PlayerInput,
+    TeamAssignment,
+    make_all_matches,
+    make_match,
+    make_top_matches,
+)
 from bot.cogs.admin import TEAM_NAMES, format_roster_block
 
 log = logging.getLogger(__name__)
@@ -90,6 +97,23 @@ def _select_playing(
     allorim = [s for s in ordered if _is_allorim(players_by_id.get(s.discord_id))]
     pool = others if len(others) >= 10 else others + allorim
     return pool[:10]
+
+
+def _team_lines(by_role: dict[str, int], emoji: bool = True) -> str:
+    """Render a team roster top-down: TOP, JUNGLE, MID, BOT, SUPPORT."""
+    out = []
+    for role in ROLES:
+        if role not in by_role:
+            continue
+        prefix = f"{ROLE_EMOJIS[role]} " if emoji else ""
+        out.append(f"{prefix}**{role}**: <@{by_role[role]}>")
+    return "\n".join(out)
+
+
+def _balance_footer(proposal) -> str:
+    """The lane/team balance summary line. Lanes are the priority metric; team
+    imbalance is shown alongside. Off-role is always 0 by construction."""
+    return f"Lane diff: {proposal.lane_diff:.0f} · Team diff: {proposal.balance_diff:.0f}"
 
 
 # =============================================================================
@@ -400,20 +424,16 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
                 title=f"🏆 Final Teams for Thursday {session.game_date.strftime('%b %d')}",
                 color=discord.Color.green(),
             )
-            t1 = "\n".join(
-                f"{ROLE_EMOJIS[role]} **{role}**: <@{pid}>"
-                for role, pid in chosen["team1"].items()
+            embed.add_field(name=f"🔵 {TEAM_NAMES[1]} (Blue)", value=_team_lines(chosen["team1"]), inline=True)
+            embed.add_field(name=f"🔴 {TEAM_NAMES[2]} (Red)", value=_team_lines(chosen["team2"]), inline=True)
+            lane = chosen.get("lane_diff")
+            balance_part = (
+                f"Lane diff: {lane:.0f} · Team diff: {chosen['balance_diff']:.0f}"
+                if lane is not None else f"Skill diff: {chosen['balance_diff']:.2f}"
             )
-            t2 = "\n".join(
-                f"{ROLE_EMOJIS[role]} **{role}**: <@{pid}>"
-                for role, pid in chosen["team2"].items()
-            )
-            embed.add_field(name=f"🔵 {TEAM_NAMES[1]} (Blue)", value=t1, inline=True)
-            embed.add_field(name=f"🔴 {TEAM_NAMES[2]} (Red)", value=t2, inline=True)
             embed.set_footer(
                 text=f"Match {match.id} · Session #{session.id} (Option {label}) · "
-                     f"Skill diff: {chosen['balance_diff']:.2f} · "
-                     f"Game time: Thu 9:30 PM ET"
+                     f"{balance_part} · Game time: Thu 9:30 PM ET"
             )
             await channel.send(content="🔒 Teams finalized:", embed=embed)
 
@@ -750,20 +770,9 @@ class RecruitmentCog(commands.Cog):
                 title=f"Option {label}",
                 color=[discord.Color.green(), discord.Color.blue(), discord.Color.purple()][i],
             )
-            t1 = "\n".join(
-                f"{ROLE_EMOJIS[role]} **{role}**: <@{pid}>"
-                for role, pid in proposal.team1.by_role.items()
-            )
-            t2 = "\n".join(
-                f"{ROLE_EMOJIS[role]} **{role}**: <@{pid}>"
-                for role, pid in proposal.team2.by_role.items()
-            )
-            embed.add_field(name=f"🔵 {TEAM_NAMES[1]}", value=t1, inline=True)
-            embed.add_field(name=f"🔴 {TEAM_NAMES[2]}", value=t2, inline=True)
-            embed.set_footer(
-                text=f"Skill diff: {proposal.balance_diff:.2f} · "
-                     f"Off-role assignments: {proposal.role_penalty:.1f}"
-            )
+            embed.add_field(name=f"🔵 {TEAM_NAMES[1]}", value=_team_lines(proposal.team1.by_role), inline=True)
+            embed.add_field(name=f"🔴 {TEAM_NAMES[2]}", value=_team_lines(proposal.team2.by_role), inline=True)
+            embed.set_footer(text=_balance_footer(proposal))
             embeds.append(embed)
 
         intro = discord.Embed(
@@ -877,9 +886,15 @@ class RecruitmentCog(commands.Cog):
 
     @app_commands.command(name="match-preview", description="(admin) Show what teams would be generated right now.")
     @app_commands.describe(
-        session_id="Session ID (from the recruitment footer). Defaults to the soonest active session."
+        session_id="Session ID (from the recruitment footer). Defaults to the soonest active session.",
+        show_all="List every no-off-role team comp (most even lanes first) instead of just the top 3.",
     )
-    async def match_preview(self, interaction: discord.Interaction, session_id: Optional[int] = None):
+    async def match_preview(
+        self,
+        interaction: discord.Interaction,
+        session_id: Optional[int] = None,
+        show_all: bool = False,
+    ):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("League Admin only.", ephemeral=True)
             return
@@ -931,6 +946,10 @@ class RecruitmentCog(commands.Cog):
                     preferred_roles=su.role_list,
                     ratings=ratings_dict,
                 ))
+        if show_all:
+            await self._send_all_comps(interaction, session.id, player_inputs)
+            return
+
         proposals = make_top_matches(player_inputs, n=3, min_diff=2)
         if not proposals:
             await interaction.followup.send("No valid matchup possible with current signups.", ephemeral=True)
@@ -943,20 +962,56 @@ class RecruitmentCog(commands.Cog):
                 title=f"Preview — Option {label}",
                 color=[discord.Color.green(), discord.Color.blue(), discord.Color.purple()][i],
             )
-            t1 = "\n".join(f"**{role}**: <@{pid}>" for role, pid in proposal.team1.by_role.items())
-            t2 = "\n".join(f"**{role}**: <@{pid}>" for role, pid in proposal.team2.by_role.items())
-            embed.add_field(name=TEAM_NAMES[1], value=t1, inline=True)
-            embed.add_field(name=TEAM_NAMES[2], value=t2, inline=True)
-            embed.set_footer(
-                text=f"Skill diff: {proposal.balance_diff:.2f} · "
-                     f"Off-role: {proposal.role_penalty:.1f}"
-            )
+            embed.add_field(name=TEAM_NAMES[1], value=_team_lines(proposal.team1.by_role, emoji=False), inline=True)
+            embed.add_field(name=TEAM_NAMES[2], value=_team_lines(proposal.team2.by_role, emoji=False), inline=True)
+            embed.set_footer(text=_balance_footer(proposal))
             embeds.append(embed)
         await interaction.followup.send(
             content=f"Top {len(proposals)} options (preview only — no commit):",
             embeds=embeds,
             ephemeral=True,
         )
+
+    # How many comps `/match-preview show_all:true` will list (best-first). The
+    # full search can yield up to 126 splits; we cap to avoid flooding the DM.
+    SHOW_ALL_CAP = 30
+
+    async def _send_all_comps(
+        self, interaction: discord.Interaction, session_id: int, player_inputs: list,
+    ) -> None:
+        """List every no-off-role team comp, most even lanes first, in compact
+        chunked ephemeral messages."""
+        comps = make_all_matches(player_inputs)
+        if not comps:
+            await interaction.followup.send("No valid matchup possible with current signups.", ephemeral=True)
+            return
+
+        total = len(comps)
+        shown = comps[: self.SHOW_ALL_CAP]
+        head = f"**{total} no-off-role comps for Session #{session_id}** (most even lanes first)"
+        if total > len(shown):
+            head += f" — showing the {len(shown)} most balanced"
+        lines = [head + ":"]
+        for i, p in enumerate(shown, 1):
+            t1 = " ".join(f"{role[:3]} <@{p.team1.by_role[role]}>" for role in ROLES if role in p.team1.by_role)
+            t2 = " ".join(f"{role[:3]} <@{p.team2.by_role[role]}>" for role in ROLES if role in p.team2.by_role)
+            lines.append(
+                f"\n**#{i}** · Lane diff {p.lane_diff:.0f} · Team diff {p.balance_diff:.0f}\n"
+                f"🔵 {t1}\n🔴 {t2}"
+            )
+
+        chunk = ""
+        for line in lines:
+            if len(chunk) + len(line) + 1 > 1900:
+                await interaction.followup.send(
+                    chunk, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+                )
+                chunk = ""
+            chunk = f"{chunk}\n{line}" if chunk else line
+        if chunk:
+            await interaction.followup.send(
+                chunk, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+            )
 
     @app_commands.command(
         name="roster-template",
@@ -1015,8 +1070,8 @@ class RecruitmentCog(commands.Cog):
         proposal = make_match(player_inputs)
         if proposal:
             team1, team2 = proposal.team1.by_role, proposal.team2.by_role
-            note = (f"Balanced starting point (skill diff {proposal.balance_diff:.0f}, "
-                    f"off-role {proposal.role_penalty:.1f}).")
+            note = (f"Balanced starting point (lane diff {proposal.lane_diff:.0f}, "
+                    f"team diff {proposal.balance_diff:.0f}).")
         else:
             ids = [su.discord_id for su in ordered]
             team1 = {ROLES[i]: ids[i] for i in range(5)}
@@ -1334,14 +1389,10 @@ class RecruitmentCog(commands.Cog):
             title=f"🏆 Teams for Thursday {session.game_date.strftime('%b %d')}",
             color=discord.Color.green(),
         )
-        t1 = "\n".join(f"{ROLE_EMOJIS[role]} **{role}**: <@{pid}>"
-                       for role, pid in proposal.team1.by_role.items())
-        t2 = "\n".join(f"{ROLE_EMOJIS[role]} **{role}**: <@{pid}>"
-                       for role, pid in proposal.team2.by_role.items())
-        embed.add_field(name=f"🔵 {TEAM_NAMES[1]} (Blue)", value=t1, inline=True)
-        embed.add_field(name=f"🔴 {TEAM_NAMES[2]} (Red)", value=t2, inline=True)
+        embed.add_field(name=f"🔵 {TEAM_NAMES[1]} (Blue)", value=_team_lines(proposal.team1.by_role), inline=True)
+        embed.add_field(name=f"🔴 {TEAM_NAMES[2]} (Red)", value=_team_lines(proposal.team2.by_role), inline=True)
         embed.set_footer(
-            text=f"Match {match.id} · Skill diff: {proposal.balance_diff:.2f} · "
+            text=f"Match {match.id} · {_balance_footer(proposal)} · "
                  f"Game time: Thu 9:30 PM ET"
         )
         return embed
