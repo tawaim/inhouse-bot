@@ -7,19 +7,21 @@ enumerate exhaustively in milliseconds:
 
   1. Filter to exactly 10 players (admin handles overflow before calling this).
   2. For every way to split players into Team A vs Team B (C(10,5) = 252 splits):
-     a. For each team, find the best role assignment (Hungarian algorithm or
-        full enumeration over 5! = 120 permutations).
-     b. A player can only be assigned a role they listed in their prefs
-        (FILL counts as all roles).
-     c. If no valid assignment exists for either team, skip this split.
-  3. Score each valid (split, assignment) pair by:
-        balance_score = |team1_skill - team2_skill|     (lower is better)
-        role_penalty  = sum over players of (0 if got primary role else penalty)
-        total_cost    = balance_score + role_weight * role_penalty
-  4. Return the best solution, ranked lexicographically: fewest off-role
-     assignments first, then best balance. A player is only put off their
-     preferred role when no lower-penalty split is legal — i.e. when required
-     for role coverage, never merely to tighten team balance.
+     a. Enumerate ALL legal role seatings for each team (full enumeration over
+        5! = 120 permutations), where a seating is legal iff every player is in
+        a role they picked (FILL counts as all roles).
+     b. Pair the team-A seatings with the team-B seatings and keep the pair with
+        the smallest skill gap. We try every seating rather than greedily
+        slotting one in, so balance is optimized across all of them.
+     c. If either team has no legal seating, skip this split.
+  3. Rank the resulting (split, seating) proposals by balance |t1 - t2|.
+
+There is deliberately no "off-role" cost. The role picker records the roles a
+player is willing to play with no primary/secondary ordering, so every picked
+role is equally fine — a player is never penalized for landing in one of their
+own picks, and the hard legality rule means nobody is ever placed in a role they
+didn't pick. role_penalty is therefore always 0 for a valid match and is kept
+only for display/back-compat.
 
 Skill is per-role conservative TrueSkill (mu - 3*sigma). A player's skill
 contribution depends on which role they're assigned to, since they have a
@@ -69,7 +71,7 @@ class MatchProposal:
     team1: TeamAssignment
     team2: TeamAssignment
     balance_diff: float          # |team1_skill - team2_skill|
-    role_penalty: float          # how many players got non-primary roles
+    role_penalty: float          # always 0 now (no off-role cost); kept for back-compat
     cost: float
 
     def to_json_dict(self) -> dict:
@@ -81,47 +83,31 @@ class MatchProposal:
         }
 
 
-def _best_role_assignment(
+def _legal_assignments(
     players: list[PlayerInput],
-) -> Optional[tuple[TeamAssignment, float]]:
-    """Given exactly 5 players, find the best legal role assignment.
-    Returns (assignment, role_penalty) or None if no legal assignment exists.
+) -> list[tuple[TeamAssignment, float]]:
+    """Every legal role seating for exactly 5 players, as (assignment, skill).
 
-    role_penalty counts how many players are NOT in their first listed
-    preferred role. FILL players cost 0.5 (they're flexible by design but
-    we still slightly prefer specialists in their roles).
+    A seating is legal iff each player is placed in a role they picked (a FILL
+    player can take any role). Returns an empty list if the five can't cover
+    five distinct roles (e.g. nobody picked SUPPORT and there's no FILL). No
+    seating is preferred here — all picked roles are equal — so the caller is
+    free to choose among them purely for team balance.
     """
     if len(players) != 5:
-        return None
+        return []
 
-    best: Optional[TeamAssignment] = None
-    best_penalty = float("inf")
-    best_skill = 0.0  # tiebreak: prefer higher-skill assignments (sanity)
-
+    out: list[tuple[TeamAssignment, float]] = []
     for perm in itertools.permutations(ROLES):
         # perm[i] is the role assigned to players[i]
-        legal = True
-        penalty = 0.0
-        for player, role in zip(players, perm):
-            if not player.can_play(role):
-                legal = False
-                break
-            if "FILL" in player.preferred_roles:
-                penalty += 0.5
-            elif role != player.preferred_roles[0]:
-                penalty += 1.0
-        if not legal:
+        if not all(player.can_play(role) for player, role in zip(players, perm)):
             continue
-        assignment = TeamAssignment(by_role={role: p.discord_id for p, role in zip(players, perm)})
-        # Lower penalty wins; tiebreak by total skill
-        if penalty < best_penalty:
-            best_penalty = penalty
-            best = assignment
-            best_skill = sum(p.skill_at(r) for p, r in zip(players, perm))
-
-    if best is None:
-        return None
-    return best, best_penalty
+        assignment = TeamAssignment(
+            by_role={role: p.discord_id for p, role in zip(players, perm)}
+        )
+        skill = sum(p.skill_at(role) for p, role in zip(players, perm))
+        out.append((assignment, skill))
+    return out
 
 
 def make_match(
@@ -130,12 +116,45 @@ def make_match(
 ) -> Optional[MatchProposal]:
     """Generate the optimally balanced match for exactly 10 players.
 
-    role_weight: how much one mis-assigned role costs in skill-points.
-                 Higher = prioritize getting people their preferred roles
-                 even at the cost of team balance.
+    role_weight is accepted for back-compat but no longer used: there is no
+    off-role cost to weigh against balance (see module docstring).
     """
     proposals = make_top_matches(players, n=1, role_weight=role_weight, min_diff=0)
     return proposals[0] if proposals else None
+
+
+def _best_balanced_seating(
+    team1_players: list[PlayerInput],
+    team2_players: list[PlayerInput],
+) -> Optional[tuple[TeamAssignment, TeamAssignment, float]]:
+    """Across every legal seating of both teams, the pair with the smallest skill
+    gap. Returns (team1, team2, balance) or None if either team can't be legally
+    seated. This is the "try all iterations" step — we never just slot the first
+    valid seating, we pick the best-balanced one."""
+    t1 = _legal_assignments(team1_players)
+    t2 = _legal_assignments(team2_players)
+    if not t1 or not t2:
+        return None
+
+    # Smallest |s1 - s2| over the two seating sets: sort both by skill and walk
+    # them with two pointers (O(n log n) instead of the n*n cross product).
+    t1.sort(key=lambda x: x[1])
+    t2.sort(key=lambda x: x[1])
+    i = j = 0
+    best: Optional[tuple[TeamAssignment, TeamAssignment, float]] = None
+    best_balance = float("inf")
+    while i < len(t1) and j < len(t2):
+        a1, s1 = t1[i]
+        a2, s2 = t2[j]
+        balance = abs(s1 - s2)
+        if balance < best_balance:
+            best_balance = balance
+            best = (a1, a2, balance)
+        if s1 < s2:
+            i += 1
+        else:
+            j += 1
+    return best
 
 
 def make_top_matches(
@@ -144,8 +163,7 @@ def make_top_matches(
     role_weight: float = 3.0,
     min_diff: int = 2,
 ) -> list[MatchProposal]:
-    """Generate the top-N matches, ranked off-role-first then by balance, with
-    diversity enforcement.
+    """Generate the top-N most-balanced matches, with diversity enforcement.
 
     Diversity rule: each returned proposal must differ from every previously
     returned proposal by at least `min_diff` player-team-swaps. Two proposals
@@ -155,15 +173,15 @@ def make_top_matches(
     enough diverse-enough options).
 
     With min_diff=0, this just returns the N lowest-cost proposals (which may
-    be near-duplicates of each other).
+    be near-duplicates of each other). role_weight is accepted for back-compat
+    but unused.
     """
     if len(players) != 10:
         raise ValueError(f"make_top_matches needs exactly 10 players, got {len(players)}")
 
-    players_by_id = {p.discord_id: p for p in players}
     indices = list(range(10))
 
-    # Collect every legal proposal first, sorted by cost
+    # Collect the best-balanced legal proposal for every distinct team split.
     all_proposals: list[MatchProposal] = []
     for team1_other in itertools.combinations(indices[1:], 4):
         team1_idx = (0,) + team1_other
@@ -172,35 +190,22 @@ def make_top_matches(
         team1_players = [players[i] for i in team1_idx]
         team2_players = [players[i] for i in team2_idx]
 
-        a1 = _best_role_assignment(team1_players)
-        a2 = _best_role_assignment(team2_players)
-        if a1 is None or a2 is None:
+        seating = _best_balanced_seating(team1_players, team2_players)
+        if seating is None:
             continue
-
-        assignment1, pen1 = a1
-        assignment2, pen2 = a2
-
-        skill1 = assignment1.total_skill(players_by_id)
-        skill2 = assignment2.total_skill(players_by_id)
-        balance = abs(skill1 - skill2)
-        total_penalty = pen1 + pen2
-        cost = balance + role_weight * total_penalty
+        assignment1, assignment2, balance = seating
 
         all_proposals.append(MatchProposal(
             team1=assignment1,
             team2=assignment2,
             balance_diff=balance,
-            role_penalty=total_penalty,
-            cost=cost,
+            role_penalty=0.0,  # everyone is in a role they picked, by construction
+            cost=balance,
         ))
 
-    # Off-role only when required: rank by role penalty first, then balance.
-    # A more-balanced split is never preferred if it would put an extra player
-    # off their preferred role. (cost is still computed above for reference but
-    # no longer drives selection.)
-    all_proposals.sort(key=lambda p: (p.role_penalty, p.balance_diff))
+    all_proposals.sort(key=lambda p: p.balance_diff)
 
-    # Greedy diversity filter: take the lowest-cost option, then the next
+    # Greedy diversity filter: take the most-balanced option, then the next
     # option that differs by at least min_diff swaps from ALL already-chosen.
     selected: list[MatchProposal] = []
     for proposal in all_proposals:

@@ -72,6 +72,48 @@ def test_fill_player_takes_unwanted_role():
     assert proposal.team2.by_role["SUPPORT"] in (5, 10)
 
 
+def test_picked_role_is_never_off_role():
+    """A player who picks multiple roles is on-role in ANY of them — even the one
+    that isn't alphabetically first (which the picker stores as preferred_roles[0]).
+    Regression: this used to be charged a 1.0 'off-role' penalty."""
+    # Everyone picks two roles; coverage is fully satisfiable with no FILL.
+    prefs = {
+        1: ["TOP", "JUNGLE"], 2: ["JUNGLE", "MID"], 3: ["MID", "BOT"],
+        4: ["BOT", "SUPPORT"], 5: ["SUPPORT", "TOP"],
+        6: ["TOP", "JUNGLE"], 7: ["JUNGLE", "MID"], 8: ["MID", "BOT"],
+        9: ["BOT", "SUPPORT"], 10: ["SUPPORT", "TOP"],
+    }
+    # Stored alphabetically, like the real picker does.
+    players = [make_player(pid, sorted(roles)) for pid, roles in prefs.items()]
+    proposal = make_match(players)
+    assert proposal is not None
+    assert proposal.role_penalty == 0.0
+    # And every player really did land in one of the roles they picked.
+    for team in (proposal.team1, proposal.team2):
+        for role, pid in team.by_role.items():
+            assert role in prefs[pid]
+
+
+def test_balance_optimized_across_all_seatings():
+    """Per-split we try every legal seating and keep the best-balanced pair, not
+    the first one slotted in. With role-dependent skills this should find a tight
+    balance rather than an arbitrary seating."""
+    # Two clean teams of 5 distinct-role specialists; skills chosen so a balanced
+    # seating exists. Specialists -> exactly one legal seating per natural team,
+    # but the split search must still find the balanced partition.
+    players = []
+    for i, role in enumerate(["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]):
+        players.append(PlayerInput(i, [role], {role: 1300}))
+        players.append(PlayerInput(i + 5, [role], {role: 1100}))
+    proposal = make_match(players)
+    assert proposal is not None
+    assert proposal.role_penalty == 0.0
+    # Five roles, each with a 1300 and an 1100 player; any split gives each team
+    # an odd count of "high" picks, so the tightest reachable gap is 200 (e.g.
+    # 5900 vs 6100). The search must find that optimal partition.
+    assert proposal.balance_diff == 200.0
+
+
 def test_wrong_player_count_raises():
     players = [make_player(i, ["FILL"]) for i in range(9)]
     with pytest.raises(ValueError):
