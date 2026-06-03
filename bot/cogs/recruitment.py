@@ -102,14 +102,32 @@ def _select_playing(
 _ROLE_SHORT = {"TOP": "TOP", "JUNGLE": "JUN", "MID": "MID", "BOT": "BOT", "SUPPORT": "SUP"}
 
 
-def _team_lines(by_role: dict[str, int], emoji: bool = True) -> str:
-    """Render a team roster top-down: TOP, JUN, MID, BOT, SUP."""
+_NAME_MAX = 14
+
+
+def _team_lines(
+    by_role: dict[str, int],
+    emoji: bool = True,
+    name_map: dict[int, str] | None = None,
+) -> str:
+    """Render a team roster top-down: TOP, JUN, MID, BOT, SUP.
+
+    If name_map is provided, names are shown as plain text truncated to _NAME_MAX
+    characters instead of Discord mentions.
+    """
     out = []
     for role in ROLES:
         if role not in by_role:
             continue
+        uid = by_role[role]
         prefix = f"{ROLE_EMOJIS[role]} " if emoji else ""
-        out.append(f"{prefix}**{_ROLE_SHORT[role]}**: <@{by_role[role]}>")
+        if name_map is not None:
+            name = name_map.get(uid, str(uid))
+            if len(name) > _NAME_MAX:
+                name = name[:_NAME_MAX - 1] + "…"
+            out.append(f"{prefix}**{_ROLE_SHORT[role]}**: {name}")
+        else:
+            out.append(f"{prefix}**{_ROLE_SHORT[role]}**: <@{uid}>")
     return "\n".join(out)
 
 
@@ -427,8 +445,13 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
                 title=f"🏆 Final Teams for Thursday {session.game_date.strftime('%b %d')}",
                 color=discord.Color.green(),
             )
-            embed.add_field(name=f"🔵 {TEAM_NAMES[1]} (Blue)", value=_team_lines(chosen["team1"]), inline=True)
-            embed.add_field(name=f"🔴 {TEAM_NAMES[2]} (Red)", value=_team_lines(chosen["team2"]), inline=True)
+            all_ids = list(chosen["team1"].values()) + list(chosen["team2"].values())
+            name_map = {
+                uid: (m.display_name if (m := interaction.guild.get_member(uid)) else str(uid))
+                for uid in all_ids
+            }
+            embed.add_field(name=f"🔵 {TEAM_NAMES[1]} (Blue)", value=_team_lines(chosen["team1"], name_map=name_map), inline=True)
+            embed.add_field(name=f"🔴 {TEAM_NAMES[2]} (Red)", value=_team_lines(chosen["team2"], name_map=name_map), inline=True)
             lane = chosen.get("lane_diff")
             balance_part = (
                 f"Lane diff: {lane:.0f} · Team diff: {chosen['balance_diff']:.0f}"
