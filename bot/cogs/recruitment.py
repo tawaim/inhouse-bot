@@ -99,14 +99,17 @@ def _select_playing(
     return pool[:10]
 
 
+_ROLE_SHORT = {"TOP": "TOP", "JUNGLE": "JUN", "MID": "MID", "BOT": "BOT", "SUPPORT": "SUP"}
+
+
 def _team_lines(by_role: dict[str, int], emoji: bool = True) -> str:
-    """Render a team roster top-down: TOP, JUNGLE, MID, BOT, SUPPORT."""
+    """Render a team roster top-down: TOP, JUN, MID, BOT, SUP."""
     out = []
     for role in ROLES:
         if role not in by_role:
             continue
         prefix = f"{ROLE_EMOJIS[role]} " if emoji else ""
-        out.append(f"{prefix}**{role}**: <@{by_role[role]}>")
+        out.append(f"{prefix}**{_ROLE_SHORT[role]}**: <@{by_role[role]}>")
     return "\n".join(out)
 
 
