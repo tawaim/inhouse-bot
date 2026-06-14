@@ -14,7 +14,7 @@ from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import delete, func, select, update
 
-from bot.config import Config, ROLES
+from bot.config import Config, ROLES, format_team_lines
 from bot.db.models import Alias, GuildConfig, Match, MatchPerformance, Player, ProposalSet, Rating, Session as InhouseSession, Signup
 from bot.db.session import get_session
 from bot.services.elo import (
@@ -290,15 +290,17 @@ class ManualMatchModal(discord.ui.Modal, title="Manual Match Entry"):
             channel_id = session.recruit_channel_id if session else None
 
         # Post the (new or updated) teams to the recruit channel, if there is one.
-        from bot.config import ROLE_EMOJIS
         title = "🏆 Updated Teams" if verb == "updated" else "🏆 Manual Teams"
         if game_date:
             title += f" for Thursday {game_date.strftime('%b %d')}"
         embed = discord.Embed(title=title, color=discord.Color.green())
-        t1 = "\n".join(f"{ROLE_EMOJIS[r]} **{r}**: <@{team1[r]}>" for r in ROLES)
-        t2 = "\n".join(f"{ROLE_EMOJIS[r]} **{r}**: <@{team2[r]}>" for r in ROLES)
-        embed.add_field(name=f"🔵 {TEAM_NAMES[1]} (Blue)", value=t1, inline=True)
-        embed.add_field(name=f"🔴 {TEAM_NAMES[2]} (Red)", value=t2, inline=True)
+        all_ids = list(team1.values()) + list(team2.values())
+        name_map = {
+            uid: (m.display_name if (m := interaction.guild.get_member(uid)) else str(uid))
+            for uid in all_ids
+        } if interaction.guild else None
+        embed.add_field(name=f"🔵 {TEAM_NAMES[1]} (Blue)", value=format_team_lines(team1, name_map=name_map), inline=True)
+        embed.add_field(name=f"🔴 {TEAM_NAMES[2]} (Red)", value=format_team_lines(team2, name_map=name_map), inline=True)
         footer = f"Match {match_id}"
         if session_id is not None:
             footer += f" · Session #{session_id}"
@@ -1248,6 +1250,7 @@ class AdminCog(commands.Cog):
                     overall.inhouse_modifier -= perf.inhouse_elo_delta or 0
                     overall.games_played = max(0, overall.games_played - 1)
                     overall.elo = overall.base_seed + overall.inhouse_modifier
+                    overall.total_balance_diff -= match.predicted_balance or 0.0
                 await db.delete(perf)
 
             prev_score = f"{match.team1_wins}-{match.team2_wins}"
@@ -1533,6 +1536,7 @@ class AdminCog(commands.Cog):
                     inhouse_modifier=0,
                     games_played=0,
                     elo=Rating.base_seed,
+                    total_balance_diff=0.0,
                 )
             )).rowcount
             await db.commit()
@@ -1621,6 +1625,13 @@ class AdminCog(commands.Cog):
             t1_overall_pre = {pid: r.elo for pid, r in t1_overall.items()}
             t2_overall_pre = {pid: r.elo for pid, r in t2_overall.items()}
 
+            # Manual matches are created with predicted_balance=None. Compute it
+            # now from pre-match role Elos so the leaderboard tiebreaker has data.
+            if match.predicted_balance is None:
+                match.predicted_balance = float(
+                    abs(sum(t1_role_pre.values()) - sum(t2_role_pre.values()))
+                )
+
             team1_won = team1_wins > team2_wins  # for the perf-row 'won' field
 
             # Update ratings: the delta is driven by TEAM vs TEAM (so teammates
@@ -1675,6 +1686,12 @@ class AdminCog(commands.Cog):
                 overall.elo = overall.base_seed + overall.inhouse_modifier
                 overall.games_played += 1
                 deltas[pid] = {"role": role_delta, "inhouse": overall_delta}
+
+            # Accumulate this match's balance difficulty on every player's INHOUSE
+            # rating so the leaderboard tiebreaker can reward harder-team players.
+            balance = match.predicted_balance or 0.0
+            for overall in {**t1_overall, **t2_overall}.values():
+                overall.total_balance_diff += balance
 
             # Write per-player performance rows. KDA from OCR if available.
             ocr_by_riot_id = {}

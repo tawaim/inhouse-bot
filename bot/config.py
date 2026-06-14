@@ -59,3 +59,32 @@ ROLE_EMOJIS = {
 }
 EMOJI_TO_ROLE = {v: k for k, v in ROLE_EMOJIS.items()}
 ROLES = ["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]  # ordered, no FILL
+
+ROLE_SHORT = {"TOP": "TOP", "JUNGLE": "JUN", "MID": "MID", "BOT": "BOT", "SUPPORT": "SUP"}
+NAME_MAX = 14
+
+
+def format_team_lines(
+    by_role: dict[str, int],
+    emoji: bool = True,
+    name_map: dict[int, str] | None = None,
+) -> str:
+    """Render a team roster top-down: TOP, JUN, MID, BOT, SUP.
+
+    If name_map is provided, names are shown as plain text truncated to NAME_MAX
+    characters instead of Discord mentions.
+    """
+    out = []
+    for role in ROLES:
+        if role not in by_role:
+            continue
+        uid = by_role[role]
+        prefix = f"{ROLE_EMOJIS[role]} " if emoji else ""
+        if name_map is not None:
+            name = name_map.get(uid, str(uid))
+            if len(name) > NAME_MAX:
+                name = name[:NAME_MAX - 1] + "…"
+            out.append(f"{prefix}**{ROLE_SHORT[role]}**: {name}")
+        else:
+            out.append(f"{prefix}**{ROLE_SHORT[role]}**: <@{uid}>")
+    return "\n".join(out)

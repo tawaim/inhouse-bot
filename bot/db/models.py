@@ -81,6 +81,7 @@ class Rating(Base):
     base_seed: Mapped[int] = mapped_column(Integer, default=1200)
     inhouse_modifier: Mapped[int] = mapped_column(Integer, default=0)
     games_played: Mapped[int] = mapped_column(Integer, default=0)
+    total_balance_diff: Mapped[float] = mapped_column(Float, default=0.0)
 
     player: Mapped[Player] = relationship(back_populates="ratings")
 

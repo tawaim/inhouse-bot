@@ -35,7 +35,7 @@ from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import select
 
-from bot.config import Config, ROLE_EMOJIS, ROLES
+from bot.config import Config, ROLE_EMOJIS, ROLES, format_team_lines
 from bot.db.models import GuildConfig, Match, MatchPerformance, Player, ProposalSet, Rating, Session as InhouseSession, Signup
 from bot.db.session import get_session
 from bot.services.matchmaking import (
@@ -99,36 +99,12 @@ def _select_playing(
     return pool[:10]
 
 
-_ROLE_SHORT = {"TOP": "TOP", "JUNGLE": "JUN", "MID": "MID", "BOT": "BOT", "SUPPORT": "SUP"}
-
-
-_NAME_MAX = 14
-
-
 def _team_lines(
     by_role: dict[str, int],
     emoji: bool = True,
     name_map: dict[int, str] | None = None,
 ) -> str:
-    """Render a team roster top-down: TOP, JUN, MID, BOT, SUP.
-
-    If name_map is provided, names are shown as plain text truncated to _NAME_MAX
-    characters instead of Discord mentions.
-    """
-    out = []
-    for role in ROLES:
-        if role not in by_role:
-            continue
-        uid = by_role[role]
-        prefix = f"{ROLE_EMOJIS[role]} " if emoji else ""
-        if name_map is not None:
-            name = name_map.get(uid, str(uid))
-            if len(name) > _NAME_MAX:
-                name = name[:_NAME_MAX - 1] + "…"
-            out.append(f"{prefix}**{_ROLE_SHORT[role]}**: {name}")
-        else:
-            out.append(f"{prefix}**{_ROLE_SHORT[role]}**: <@{uid}>")
-    return "\n".join(out)
+    return format_team_lines(by_role, emoji=emoji, name_map=name_map)
 
 
 def _balance_footer(proposal) -> str:

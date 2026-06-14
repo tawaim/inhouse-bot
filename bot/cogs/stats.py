@@ -6,11 +6,12 @@ from typing import Literal, Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
+from collections import defaultdict
+
 from sqlalchemy import select
 
 from bot.db.models import GameStat, Match, MatchPerformance, Player, Rating
 from bot.db.session import get_session
-# elo is just an int; no import needed
 
 INHOUSE_ROLE = "INHOUSE"
 
@@ -19,7 +20,7 @@ class StatsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="leaderboard", description="Inhouse leaderboard with wins, games, and elo.")
+    @app_commands.command(name="leaderboard", description="Inhouse leaderboard ranked by individual game wins.")
     @app_commands.describe(role="Filter by a specific role (optional)")
     async def leaderboard(
         self,
@@ -28,70 +29,79 @@ class StatsCog(commands.Cog):
     ):
         await interaction.response.defer()
         async with get_session() as db:
-            # No role -> rank by the overall INHOUSE rating (every series counts,
-            # across all roles). With a role -> rank by that role's rating.
-            scope_role = role or "INHOUSE"
-            rating_rows = (await db.execute(
-                select(Rating, Player)
-                .join(Player, Player.discord_id == Rating.discord_id)
-                .where(Rating.games_played > 0)
-                .where(Rating.role == scope_role)
-            )).all()
-
-            perf_stmt = select(MatchPerformance)
+            perf_stmt = (
+                select(MatchPerformance, Match)
+                .join(Match, Match.id == MatchPerformance.match_id)
+                .where(Match.winner.isnot(None))
+            )
             if role:
                 perf_stmt = perf_stmt.where(MatchPerformance.role == role)
-            perfs = (await db.execute(perf_stmt)).scalars().all()
+            perf_rows = (await db.execute(perf_stmt)).all()
 
-            # For the overall view, label each player's best (highest-elo) role.
-            best_role: dict[int, tuple[str, int]] = {}
-            if not role:
+            inhouse_ratings = {
+                r.discord_id: r
                 for r in (await db.execute(
-                    select(Rating).where(Rating.role != "INHOUSE").where(Rating.games_played > 0)
-                )).scalars().all():
-                    cur = best_role.get(r.discord_id)
-                    if cur is None or r.elo > cur[1]:
-                        best_role[r.discord_id] = (r.role, r.elo)
+                    select(Rating).where(Rating.role == INHOUSE_ROLE)
+                )).scalars().all()
+            }
 
-        # Tally W/L. Per-role view keys by (player, role); the overall view keys by
-        # player, so it sums every series that player has appeared in.
-        wl: dict = {}
-        for p in perfs:
-            key = (p.discord_id, p.role) if role else p.discord_id
-            b = wl.setdefault(key, {"wins": 0, "losses": 0})
-            b["wins" if p.won else "losses"] += 1
+            players = {
+                p.discord_id: p
+                for p in (await db.execute(select(Player))).scalars().all()
+            }
 
-        ranked = sorted(rating_rows, key=lambda rp: rp[0].elo, reverse=True)
-        lines = []
-        for i, (rating, player) in enumerate(ranked, 1):
-            name = player.riot_game_name or f"<@{player.discord_id}>"
-            games = rating.games_played
-            rec = wl.get((player.discord_id, role) if role else player.discord_id,
-                         {"wins": 0, "losses": 0})
-            wins, losses = rec["wins"], rec["losses"]
-            wr = (wins / games * 100) if games else 0
-            if role:
-                tail = ""
+        # Aggregate per player.
+        stats: dict[int, dict] = defaultdict(lambda: {
+            "game_wins": 0, "series_wins": 0, "series_losses": 0,
+        })
+        for perf, match in perf_rows:
+            s = stats[perf.discord_id]
+            if perf.won:
+                s["game_wins"] += max(match.team1_wins, match.team2_wins)
+                s["series_wins"] += 1
             else:
-                br = best_role.get(player.discord_id)
-                tail = f" · {br[0]}" if br else ""
+                s["game_wins"] += min(match.team1_wins, match.team2_wins)
+                s["series_losses"] += 1
+
+        def avg_balance_diff(discord_id: int) -> float:
+            r = inhouse_ratings.get(discord_id)
+            if r is None or r.games_played == 0:
+                return 0.0
+            return r.total_balance_diff / r.games_played
+
+        ranked = sorted(
+            stats.items(),
+            key=lambda kv: (kv[1]["game_wins"], avg_balance_diff(kv[0])),
+            reverse=True,
+        )
+
+        lines = []
+        for i, (discord_id, s) in enumerate(ranked, 1):
+            player = players.get(discord_id)
+            name = (player.riot_game_name if player and player.riot_game_name
+                    else f"<@{discord_id}>")
+            sw, sl = s["series_wins"], s["series_losses"]
+            series_total = sw + sl
+            series_pct = sw / series_total * 100 if series_total else 0
             lines.append(
-                f"`{i:>2}.` **{name}** · {wins}W-{losses}L ({wr:.0f}%) · "
-                f"{games} games · Elo {rating.elo}{tail}"
+                f"`{i:>2}.` **{name}** · {s['game_wins']} wins"
+                f" · {sw}W-{sl}L series ({series_pct:.0f}%)"
             )
-        # Show everyone with a game; only trim if we'd exceed Discord's 4096-char
-        # description limit.
+
         desc = ""
         for n, ln in enumerate(lines):
             if len(desc) + len(ln) + 1 > 3900:
                 desc += f"\n…and {len(lines) - n} more"
                 break
             desc += ("\n" if desc else "") + ln
+
+        title = f"🏆 Leaderboard — {role}" if role else "🏆 Inhouse Leaderboard"
         embed = discord.Embed(
-            title=f"🏆 Leaderboard — {role}" if role else "🏆 Inhouse Leaderboard (overall)",
+            title=title,
             description=desc or "No games played yet.",
             color=discord.Color.gold(),
         )
+        embed.set_footer(text="Ranked by individual game wins · tiebreaker: avg team difficulty")
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(
