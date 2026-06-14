@@ -635,8 +635,14 @@ class RecruitmentCog(commands.Cog):
         posted = 0
         for d in upcoming_recruit_thursdays(today):
             async with get_session() as db:
+                # A cancelled session doesn't count as "already posted" — if an
+                # admin cancels a recruitment, the date is free to be re-posted
+                # when its window comes around again.
                 exists = (await db.execute(
-                    select(InhouseSession).where(InhouseSession.game_date == d)
+                    select(InhouseSession).where(
+                        InhouseSession.game_date == d,
+                        InhouseSession.status != "cancelled",
+                    )
                 )).scalars().first()
             if exists is not None:
                 continue

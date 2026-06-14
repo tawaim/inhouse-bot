@@ -16,8 +16,15 @@ from discord.ext import commands
 from sqlalchemy import delete, func, select, update
 
 from bot.config import Config, ROLES, format_team_lines
-from bot.db.models import Alias, GuildConfig, Match, MatchPerformance, Player, ProposalSet, Rating, Session as InhouseSession, Signup
+from bot.db.models import Alias, GameStat, GuildConfig, Match, MatchPerformance, Player, ProposalSet, Rating, Session as InhouseSession, Signup
 from bot.db.session import get_session
+from bot.services.champions import resolve_champion
+from bot.services.report_analysis import (
+    GameResult,
+    ReportState,
+    build_game_proposal,
+)
+from bot.services.ocr import parse_scoreboard_image
 from bot.services.elo import (
     DEFAULT_ELO,
     INHOUSE_ROLE,
@@ -25,9 +32,8 @@ from bot.services.elo import (
     parse_series_score,
     seed_from_past_season,
     seed_from_rank,
-    update_elo_team_series,
+    update_elo_team_game,
 )
-from bot.services.ocr import parse_screenshot
 from bot.services.opgg_client import OpggClient
 from bot.services.riot_client import RiotAuthError, RiotClient
 
@@ -729,6 +735,196 @@ class ResolveNamesModal(discord.ui.Modal, title="Resolve names → mentions"):
         )
 
 
+# =============================================================================
+# /report — multi-screenshot, per-game confirm flow
+# =============================================================================
+
+def _report_embed(state: ReportState, labels: dict[int, str]) -> discord.Embed:
+    """Render the current proposed report for the confirm message."""
+    e = discord.Embed(title=f"Confirm report — Match {state.match_id}",
+                      color=discord.Color.orange())
+    for gi, (g, winner) in enumerate(zip(state.games, state.winners), start=1):
+        lines = []
+        for team in (1, 2):
+            tag = "🔵" if team == 1 else "🔴"
+            crown = " 🏆" if winner == team else ""
+            lines.append(f"{tag} **{TEAM_NAMES[team]}**{crown}")
+            for s in [x for x in g.slots if x.team == team]:
+                who = labels.get(s.discord_id, f"<@{s.discord_id}>") if s.discord_id \
+                    else f"⚠️ {s.name_guess or '?'}"
+                champ = s.champion or "—"
+                kda = f"{s.kills}/{s.deaths}/{s.assists}" if s.kills is not None else "—"
+                lines.append(f"`{s.role:7}` {who} · {champ} · {kda}")
+        e.add_field(name=f"Game {gi}", value="\n".join(lines), inline=False)
+    ok, problems = state.ready()
+    e.set_footer(text=("⚠️ " + " · ".join(problems[:3])) if problems
+                 else "Set winners, fix players/champions, then ✅ Commit.")
+    return e
+
+
+class _WinnerButton(discord.ui.Button):
+    def __init__(self, gi: int, state: ReportState):
+        super().__init__(label=f"G{gi+1}: {TEAM_NAMES[state.winners[gi]]}",
+                         style=discord.ButtonStyle.secondary, row=0)
+        self.gi = gi
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.state.toggle_winner(self.gi)
+        await self.view.refresh(interaction)
+
+
+class _PlayerSelect(discord.ui.UserSelect):
+    def __init__(self, gi: int, slot):
+        super().__init__(
+            placeholder=f"G{gi+1} {slot.role} (read “{slot.name_guess or '?'}”) → pick player",
+            min_values=1, max_values=1,
+        )
+        self.gi, self.slot = gi, slot
+
+    async def callback(self, interaction: discord.Interaction):
+        member = self.values[0]
+        v = self.view
+        v.state.set_player(self.gi, self.slot.team, self.slot.role, member.id)
+        v.labels[member.id] = member.display_name
+        await v.cog._learn_alias(self.slot.name_guess, member.id)
+        v.show_players()  # rebuild (fewer unresolved now)
+        await v.refresh(interaction)
+
+
+_KDA_LINE_RE = re.compile(r"(\d{1,2})\s*/\s*(\d{1,2})\s*/\s*(\d{1,2})\s*$")
+
+
+class _ChampionModal(discord.ui.Modal, title="Champions & KDA — one player per line"):
+    """Edit champion + KDA per player. One paragraph box per game, 10 lines in the
+    shown order (T1 top→sup, then T2 top→sup); each line is 'Champion k/d/a'."""
+
+    def __init__(self, view: "ReportConfirmView"):
+        super().__init__()
+        self.view_ref = view
+        self.boxes = []
+        for gi, g in enumerate(view.state.games):
+            lines = []
+            for s in g.slots:
+                kda = f"{s.kills}/{s.deaths}/{s.assists}" if s.kills is not None else ""
+                lines.append(f"{s.champion or ''} {kda}".strip())
+            box = discord.ui.TextInput(
+                label=f"Game {gi+1} — 'Champion k/d/a' per line",
+                style=discord.TextStyle.paragraph, required=False,
+                default="\n".join(lines), max_length=600,
+            )
+            self.boxes.append(box)
+            self.add_item(box)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        for gi, box in enumerate(self.boxes):
+            slots = self.view_ref.state.games[gi].slots
+            for i, line in enumerate(box.value.splitlines()):
+                if i >= len(slots) or not line.strip():
+                    continue
+                m = _KDA_LINE_RE.search(line)
+                if m:
+                    slots[i].kills = int(m.group(1))
+                    slots[i].deaths = int(m.group(2))
+                    slots[i].assists = int(m.group(3))
+                    line = line[: m.start()].strip()
+                if line.strip():
+                    slots[i].champion = resolve_champion(line) or line.strip()
+        await self.view_ref.refresh(interaction)
+
+
+class ReportConfirmView(discord.ui.View):
+    """Ephemeral confirm/correct UI for /report. Drives a pure ReportState; the
+    Discord components are a thin shell over its tested transitions."""
+
+    def __init__(self, cog, state: ReportState, labels: dict[int, str],
+                 screenshot_url: Optional[str], author_id: int):
+        super().__init__(timeout=900)
+        self.cog = cog
+        self.state = state
+        self.labels = labels
+        self.screenshot_url = screenshot_url
+        self.author_id = author_id
+        self.show_main()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("This isn't your report.", ephemeral=True)
+            return False
+        return True
+
+    async def refresh(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(embed=_report_embed(self.state, self.labels), view=self)
+
+    def show_main(self):
+        self.clear_items()
+        for gi in range(len(self.state.games)):
+            self.add_item(_WinnerButton(gi, self.state))
+        fix = discord.ui.Button(label="Fix players", emoji="👤",
+                                style=discord.ButtonStyle.primary, row=1)
+        fix.disabled = not self.state.unresolved_slots()
+        fix.callback = self._on_fix_players
+        champs = discord.ui.Button(label="Champs / KDA", emoji="⚔️",
+                                   style=discord.ButtonStyle.primary, row=1)
+        champs.callback = self._on_champions
+        commit = discord.ui.Button(label="Commit", emoji="✅",
+                                   style=discord.ButtonStyle.success, row=2)
+        commit.callback = self._on_commit
+        cancel = discord.ui.Button(label="Cancel", emoji="❌",
+                                   style=discord.ButtonStyle.danger, row=2)
+        cancel.callback = self._on_cancel
+        for b in (fix, champs, commit, cancel):
+            self.add_item(b)
+
+    def show_players(self):
+        self.clear_items()
+        remaining = self.state.unresolved_slots()
+        if not remaining:
+            self.show_main()
+            return
+        # Each UserSelect fills a full action row; Discord allows 5 rows total, so
+        # resolve up to 4 per page and reserve the last row for the Done button.
+        # If more remain, the admin clicks Done → Fix players again for the next batch.
+        for gi, slot in remaining[:4]:
+            self.add_item(_PlayerSelect(gi, slot))
+        more = len(remaining) - 4
+        label = f"Done ({more} more after these)" if more > 0 else "Done"
+        done = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary, row=4)
+        done.callback = self._on_done
+        self.add_item(done)
+
+    async def _on_fix_players(self, interaction: discord.Interaction):
+        self.show_players()
+        await self.refresh(interaction)
+
+    async def _on_done(self, interaction: discord.Interaction):
+        self.show_main()
+        await self.refresh(interaction)
+
+    async def _on_champions(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(_ChampionModal(self))
+
+    async def _on_cancel(self, interaction: discord.Interaction):
+        for c in self.children:
+            c.disabled = True
+        self.stop()
+        await interaction.response.edit_message(content="❌ Report cancelled.", embed=None, view=None)
+
+    async def _on_commit(self, interaction: discord.Interaction):
+        ok, problems = self.state.ready()
+        if not ok:
+            await interaction.response.send_message(
+                "Can't commit yet:\n• " + "\n• ".join(problems), ephemeral=True)
+            return
+        await interaction.response.defer()
+        games = self.state.to_game_results()
+        await self.cog._commit_games(self.state.match_id, games, self.screenshot_url, self.author_id)
+        self.stop()
+        await interaction.edit_original_response(
+            content=f"✅ Match {self.state.match_id} recorded — {len(games)} game(s), elo updated.",
+            embed=_report_embed(self.state, self.labels), view=None,
+        )
+
+
 class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot, config: Config, riot: RiotClient, opgg: OpggClient):
         self.bot = bot
@@ -1104,31 +1300,58 @@ class AdminCog(commands.Cog):
             msg += "\n⚠️ " + "; ".join(problems)
         await interaction.followup.send(msg, ephemeral=True)
 
-    @app_commands.command(name="report", description="(admin) Report best-of-3 series outcome with screenshot.")
+    async def _build_resolver(self, guild: discord.Guild):
+        """Build a name->discord_id resolver over the alias index + linked players,
+        plus a {discord_id -> display label} map. Only CONFIDENT matches resolve
+        (alias or unique exact); fuzzy/ambiguous return None so the slot goes to the
+        ephemeral picker."""
+        async with get_session() as db:
+            alias_map = {a.alias_norm: a.discord_id
+                         for a in (await db.execute(select(Alias))).scalars().all()}
+            index, labels = await _build_candidate_index(guild, db)
+            keys = list(index.keys())
+
+        def resolve(name: str) -> Optional[int]:
+            return _resolve_single_name(name, alias_map, index, keys).discord_id
+
+        return resolve, labels
+
+    async def _learn_alias(self, name: str, discord_id: int) -> None:
+        """Persist a confirmed scoreboard-name -> player mapping so it auto-resolves
+        next time."""
+        n = _norm_name(name)
+        if not n:
+            return
+        async with get_session() as db:
+            existing = await db.get(Alias, n)
+            if existing is None:
+                db.add(Alias(alias_norm=n, discord_id=discord_id, alias=name))
+            elif existing.discord_id != discord_id:
+                existing.discord_id = discord_id
+            await db.commit()
+
+    @app_commands.command(
+        name="report",
+        description="(admin) Report a match from up to 3 game screenshots.",
+    )
     @app_commands.describe(
         match_id="The match ID from the teams post",
-        series_score='Series score from team1 perspective: "2-0", "2-1", "1-2", or "0-2"',
-        screenshot="End-of-game screenshot",
+        game1="Game 1 scoreboard screenshot",
+        game2="Game 2 screenshot (optional)",
+        game3="Game 3 screenshot (optional)",
     )
     async def report(
         self,
         interaction: discord.Interaction,
         match_id: int,
-        series_score: str,
-        screenshot: discord.Attachment,
+        game1: discord.Attachment,
+        game2: Optional[discord.Attachment] = None,
+        game3: Optional[discord.Attachment] = None,
     ):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("League Admin only.", ephemeral=True)
             return
-        team1_wins, team2_wins = parse_series_score(series_score)
-        if team1_wins < 0:
-            await interaction.response.send_message(
-                'Invalid series score. Use "2-0", "2-1", "1-2", or "0-2".',
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
 
         async with get_session() as db:
             match = await db.get(Match, match_id)
@@ -1137,59 +1360,30 @@ class AdminCog(commands.Cog):
                 return
             if match.winner is not None:
                 await interaction.followup.send(
-                    f"Match {match_id} already reported. Use /unreport first if this is a correction.",
+                    f"Match {match_id} already reported — /unreport first to correct it.",
                     ephemeral=True,
                 )
                 return
+            fixed_t1 = {k: int(v) for k, v in json.loads(match.team1_json).items()}
+            fixed_t2 = {k: int(v) for k, v in json.loads(match.team2_json).items()}
 
-        # OCR for KDA enrichment (winner is admin-specified, not OCR-determined)
-        image_bytes = await screenshot.read()
-        parsed = parse_screenshot(image_bytes)
+        guild = interaction.guild
+        if guild is not None and not guild.chunked:
+            try:
+                await guild.chunk()
+            except Exception:
+                log.warning("report: guild chunk failed; matching on cache", exc_info=True)
+        resolve, labels = await self._build_resolver(guild)
 
-        # Show admin a confirmation embed before committing
-        winner_label = TEAM_NAMES[1] if team1_wins > team2_wins else TEAM_NAMES[2]
-        embed = discord.Embed(
-            title=f"Confirm Match {match_id} Report",
-            color=discord.Color.orange(),
-            description=f"**Series:** {team1_wins}-{team2_wins} ({winner_label} wins)\n**Screenshot:** {screenshot.filename}",
-        )
-        if parsed.notes:
-            embed.add_field(name="OCR Notes", value="\n".join(parsed.notes), inline=False)
-        if parsed.players:
-            lines = [
-                f"`{p.kills}/{p.deaths}/{p.assists}` {p.riot_id or '?'}"
-                for p in parsed.players[:12]
-            ]
-            embed.add_field(name="Detected rows", value="\n".join(lines) or "none", inline=False)
-        embed.set_footer(text=f"OCR confidence: {parsed.confidence:.0%}. Click ✅ to commit, ❌ to cancel.")
+        attachments = [a for a in (game1, game2, game3) if a is not None]
+        proposals = []
+        for att in attachments:
+            parsed = parse_scoreboard_image(await att.read())
+            proposals.append(build_game_proposal(parsed, resolve, fixed_t1, fixed_t2))
 
-        confirm_msg = await interaction.followup.send(embed=embed)
-        await confirm_msg.add_reaction("✅")
-        await confirm_msg.add_reaction("❌")
-
-        def check(reaction: discord.Reaction, user: discord.User):
-            return (
-                user.id == interaction.user.id
-                and reaction.message.id == confirm_msg.id
-                and str(reaction.emoji) in ("✅", "❌")
-            )
-
-        try:
-            reaction, _ = await self.bot.wait_for("reaction_add", check=check, timeout=120.0)
-        except Exception:
-            await confirm_msg.edit(content="⏱️ Confirmation timed out.", embed=None)
-            return
-
-        if str(reaction.emoji) == "❌":
-            await confirm_msg.edit(content="❌ Cancelled.", embed=None)
-            return
-
-        # Commit: update match, write performances, run elo update
-        await self._commit_result(match_id, team1_wins, team2_wins, screenshot.url, interaction.user.id, parsed)
-        await confirm_msg.edit(
-            content=f"✅ Match {match_id} recorded. Series {team1_wins}-{team2_wins} ({winner_label} wins). Elo updated.",
-            embed=None,
-        )
+        state = ReportState.from_proposals(match_id, proposals)
+        view = ReportConfirmView(self, state, labels, game1.url, interaction.user.id)
+        await interaction.followup.send(embed=_report_embed(state, labels), view=view, ephemeral=True)
 
     @app_commands.command(name="report-manual", description="(admin) Report best-of-3 series outcome without a screenshot.")
     @app_commands.describe(
@@ -1321,21 +1515,36 @@ class AdminCog(commands.Cog):
                 select(MatchPerformance).where(MatchPerformance.match_id == match_id)
             )).scalars().all()
 
-            # Reverse each player's stored deltas on their role + INHOUSE ratings,
-            # and decrement games_played. This exactly restores pre-report state.
+            # How many games each player actually played, from GameStat. Pre-per-game
+            # ("legacy") matches have no GameStat rows — fall back to 1 per player,
+            # matching how they were committed (one rating event per series).
+            gstats = (await db.execute(
+                select(GameStat).where(GameStat.match_id == match_id)
+            )).scalars().all()
+            games_by_pid: dict[int, int] = defaultdict(int)
+            for gs in gstats:
+                games_by_pid[gs.discord_id] += 1
+            legacy = len(gstats) == 0
+
+            # Reverse each player's stored (summed) deltas on their role + INHOUSE
+            # ratings, and decrement games_played by the games they played. Exactly
+            # restores pre-report state.
             for perf in perfs:
+                cnt = 1 if legacy else games_by_pid.get(perf.discord_id, 0)
                 role_rating = await db.get(Rating, (perf.discord_id, perf.role))
                 if role_rating is not None:
                     role_rating.inhouse_modifier -= perf.role_elo_delta or 0
-                    role_rating.games_played = max(0, role_rating.games_played - 1)
+                    role_rating.games_played = max(0, role_rating.games_played - cnt)
                     role_rating.elo = role_rating.base_seed + role_rating.inhouse_modifier
                 overall = await db.get(Rating, (perf.discord_id, INHOUSE_ROLE))
                 if overall is not None:
                     overall.inhouse_modifier -= perf.inhouse_elo_delta or 0
-                    overall.games_played = max(0, overall.games_played - 1)
+                    overall.games_played = max(0, overall.games_played - cnt)
                     overall.elo = overall.base_seed + overall.inhouse_modifier
-                    overall.total_balance_diff -= match.predicted_balance or 0.0
+                    overall.total_balance_diff -= (match.predicted_balance or 0.0) * cnt
                 await db.delete(perf)
+            for gs in gstats:
+                await db.delete(gs)
 
             prev_score = f"{match.team1_wins}-{match.team2_wins}"
             match.winner = None
@@ -1612,6 +1821,7 @@ class AdminCog(commands.Cog):
         async with get_session() as db:
             # Delete in FK-dependency order: rows referencing matches first.
             await db.execute(delete(MatchPerformance))
+            await db.execute(delete(GameStat))
             await db.execute(delete(ProposalSet))
             deleted = (await db.execute(delete(Match))).rowcount
             # Reset accumulated inhouse results; keep base_seed (rank-derived).
@@ -1646,180 +1856,192 @@ class AdminCog(commands.Cog):
         admin_id: int,
         parsed,
     ) -> None:
+        """Series-score reporting (no subs): expand the series into per-game
+        results over the match's fixed roster and delegate to _commit_games.
+
+        This keeps /report-manual, pickup-series, and the Monday proposal flow
+        working unchanged while elo is now applied per game. The multi-screenshot
+        flow calls _commit_games directly with real per-game lineups (subs).
+        """
+        async with get_session() as db:
+            match = await db.get(Match, match_id)
+            if match is None or match.winner is not None:
+                return  # idempotency guard (see _commit_games)
+            team1 = {k: int(v) for k, v in json.loads(match.team1_json).items()}
+            team2 = {k: int(v) for k, v in json.loads(match.team2_json).items()}
+
+            # Series-level OCR gives one scoreboard, not per-game KDA. Attach it to
+            # the LAST game only (assume the end-of-series scoreboard) so per-game
+            # KDA totals aren't multiplied across games.
+            kdas: dict[int, tuple] = {}
+            if parsed:
+                ocr_by_riot_id = {p.riot_id: p for p in parsed.players if p.riot_id}
+                for pid in list(team1.values()) + list(team2.values()):
+                    player = await db.get(Player, pid)
+                    if player and player.riot_game_name:
+                        row = ocr_by_riot_id.get(f"{player.riot_game_name}#{player.riot_tag_line}")
+                        if row:
+                            kdas[pid] = (row.kills, row.deaths, row.assists)
+
+        # team1 wins first, then team2 — order has only a minor effect on elo
+        # (ratings evolve game to game) and is deterministic.
+        games = [GameResult(winner=1, team1=team1, team2=team2) for _ in range(team1_wins)]
+        games += [GameResult(winner=2, team1=team1, team2=team2) for _ in range(team2_wins)]
+        if games and kdas:
+            games[-1].kdas = kdas
+        await self._commit_games(match_id, games, screenshot_url, admin_id)
+
+    async def _commit_games(
+        self,
+        match_id: int,
+        games: list["GameResult"],
+        screenshot_url: str | None,
+        admin_id: int,
+    ) -> None:
+        """Apply a match GAME BY GAME to the ACTUAL participants of each game, so
+        a sub earns elo only for the games they played. Writes per-game GameStat
+        rows and one aggregate MatchPerformance row per player (summed elo deltas)
+        so /unreport reverses exactly. games_played counts ACTUAL games.
+        """
+        if not games:
+            return
         async with get_session() as db:
             match = await db.get(Match, match_id)
             if match is None:
                 return
             if match.winner is not None:
-                # Already reported. Idempotent guard: the /report flow checks this
-                # in a separate session before a 120s reaction wait, so without
-                # re-checking here a second /report (or a racing /report-manual)
-                # would double-apply elo. Bail out instead.
+                # Already reported. The /report flow checks this before a 120s
+                # reaction wait, so re-check here to avoid double-applying elo.
                 return
-            team1: dict[str, int] = {k: int(v) for k, v in json.loads(match.team1_json).items()}
-            team2: dict[str, int] = {k: int(v) for k, v in json.loads(match.team2_json).items()}
 
-            # Per-player elo deltas applied this match, so /unreport can reverse them.
-            deltas: dict[int, dict[str, int]] = {}
+            cache: dict[tuple, Rating] = {}
 
-            # Helper: get-or-create a rating row. New rows start at DEFAULT_ELO
-            # base_seed with 0 modifier (someone who's never linked but appears
-            # in a manual match — edge case).
-            async def get_or_create_rating(pid: int, role: str) -> Rating:
-                r = await db.get(Rating, (pid, role))
+            async def rget(pid: int, role: str) -> Rating:
+                key = (pid, role)
+                r = cache.get(key)
                 if r is None:
-                    r = Rating(
-                        discord_id=pid, role=role,
-                        elo=DEFAULT_ELO,
-                        base_seed=DEFAULT_ELO,
-                        inhouse_modifier=0,
-                        games_played=0,
-                    )
-                    db.add(r)
+                    r = await db.get(Rating, key)
+                    if r is None:
+                        r = Rating(
+                            discord_id=pid, role=role, elo=DEFAULT_ELO,
+                            base_seed=DEFAULT_ELO, inhouse_modifier=0, games_played=0,
+                        )
+                        db.add(r)
+                    cache[key] = r
                 return r
 
-            # Fetch all ratings we'll need: per-role for players + INHOUSE for all 10
-            t1_role_ratings: dict[str, Rating] = {}
-            t2_role_ratings: dict[str, Rating] = {}
-            t1_overall: dict[int, Rating] = {}
-            t2_overall: dict[int, Rating] = {}
-            for role, pid in team1.items():
-                t1_role_ratings[role] = await get_or_create_rating(pid, role)
-                t1_overall[pid] = await get_or_create_rating(pid, INHOUSE_ROLE)
-            for role, pid in team2.items():
-                t2_role_ratings[role] = await get_or_create_rating(pid, role)
-                t2_overall[pid] = await get_or_create_rating(pid, INHOUSE_ROLE)
+            deltas: dict[int, dict[str, int]] = defaultdict(lambda: {"role": 0, "inhouse": 0})
+            played: dict[int, int] = defaultdict(int)  # discord_id -> games actually played
+            first_balance: Optional[float] = None
+            t1_wins = t2_wins = 0
 
-            # Compute opposing-team averages BEFORE applying any changes,
-            # so updates use pre-match values consistently. Use displayed elo
-            # (base_seed + inhouse_modifier) for the matchup math.
-            t1_role_avg = average_elo([r.elo for r in t1_role_ratings.values()])
-            t2_role_avg = average_elo([r.elo for r in t2_role_ratings.values()])
-            t1_overall_avg = average_elo([r.elo for r in t1_overall.values()])
-            t2_overall_avg = average_elo([r.elo for r in t2_overall.values()])
+            for gi, g in enumerate(games, start=1):
+                if g.winner == 1:
+                    t1_wins += 1
+                else:
+                    t2_wins += 1
+                t1, t2 = g.team1, g.team2
+                t1won = g.winner == 1
 
-            # Snapshot every pre-match elo too. The per-player matchup inputs
-            # (player_elo and lane_opponent_elo) must ALL be pre-match: Team 1 is
-            # committed before Team 2's loop runs, so reading Team 1's ratings live
-            # there would pick up their just-applied gains and skew (and break the
-            # symmetry of) Team 2's lane bias. Snapshotting makes scoring identical
-            # regardless of which team is processed first.
-            t1_role_pre = {role: r.elo for role, r in t1_role_ratings.items()}
-            t2_role_pre = {role: r.elo for role, r in t2_role_ratings.items()}
-            t1_overall_pre = {pid: r.elo for pid, r in t1_overall.items()}
-            t2_overall_pre = {pid: r.elo for pid, r in t2_overall.items()}
+                t1_role = {role: await rget(pid, role) for role, pid in t1.items()}
+                t2_role = {role: await rget(pid, role) for role, pid in t2.items()}
+                t1_over = {pid: await rget(pid, INHOUSE_ROLE) for pid in t1.values()}
+                t2_over = {pid: await rget(pid, INHOUSE_ROLE) for pid in t2.values()}
 
-            # Manual matches are created with predicted_balance=None. Compute it
-            # now from pre-match role Elos so the leaderboard tiebreaker has data.
+                # Pre-game snapshots (all matchup inputs must be pre-game so the two
+                # team loops stay symmetric; ratings only mutate within the loop).
+                t1_ravg = average_elo([r.elo for r in t1_role.values()])
+                t2_ravg = average_elo([r.elo for r in t2_role.values()])
+                t1_oavg = average_elo([r.elo for r in t1_over.values()])
+                t2_oavg = average_elo([r.elo for r in t2_over.values()])
+                t1_rpre = {role: r.elo for role, r in t1_role.items()}
+                t2_rpre = {role: r.elo for role, r in t2_role.items()}
+                t1_opre = {pid: r.elo for pid, r in t1_over.items()}
+                t2_opre = {pid: r.elo for pid, r in t2_over.items()}
+
+                if first_balance is None:
+                    first_balance = abs(sum(t1_rpre.values()) - sum(t2_rpre.values()))
+
+                for role, pid in t1.items():
+                    rr = t1_role[role]
+                    _, rd = update_elo_team_game(
+                        t1_ravg, t2_ravg, t1_rpre[role], t2_rpre.get(role, t2_ravg), won=t1won)
+                    rr.inhouse_modifier += rd
+                    rr.elo = rr.base_seed + rr.inhouse_modifier
+                    rr.games_played += 1
+                    ov = t1_over[pid]
+                    _, od = update_elo_team_game(
+                        t1_oavg, t2_oavg, t1_opre[pid], t2_opre.get(t2.get(role), t2_oavg), won=t1won)
+                    ov.inhouse_modifier += od
+                    ov.elo = ov.base_seed + ov.inhouse_modifier
+                    ov.games_played += 1
+                    deltas[pid]["role"] += rd
+                    deltas[pid]["inhouse"] += od
+                    played[pid] += 1
+
+                for role, pid in t2.items():
+                    rr = t2_role[role]
+                    _, rd = update_elo_team_game(
+                        t2_ravg, t1_ravg, t2_rpre[role], t1_rpre.get(role, t1_ravg), won=not t1won)
+                    rr.inhouse_modifier += rd
+                    rr.elo = rr.base_seed + rr.inhouse_modifier
+                    rr.games_played += 1
+                    ov = t2_over[pid]
+                    _, od = update_elo_team_game(
+                        t2_oavg, t1_oavg, t2_opre[pid], t1_opre.get(t1.get(role), t1_oavg), won=not t1won)
+                    ov.inhouse_modifier += od
+                    ov.elo = ov.base_seed + ov.inhouse_modifier
+                    ov.games_played += 1
+                    deltas[pid]["role"] += rd
+                    deltas[pid]["inhouse"] += od
+                    played[pid] += 1
+
+                # Per-game stat rows (champions normalized to canonical names).
+                for roster, won in ((t1, t1won), (t2, not t1won)):
+                    for role, pid in roster.items():
+                        k = g.kdas.get(pid, (None, None, None))
+                        champ = g.champions.get(pid)
+                        db.add(GameStat(
+                            match_id=match.id, game_no=gi, discord_id=pid, role=role,
+                            champion=(resolve_champion(champ) or champ) if champ else None,
+                            kills=k[0], deaths=k[1], assists=k[2], won=won,
+                        ))
+
+            # predicted_balance: keep an existing value, else use game 1's role gap.
             if match.predicted_balance is None:
-                match.predicted_balance = float(
-                    abs(sum(t1_role_pre.values()) - sum(t2_role_pre.values()))
-                )
-
-            team1_won = team1_wins > team2_wins  # for the perf-row 'won' field
-
-            # Update ratings: the delta is driven by TEAM vs TEAM (so teammates
-            # move together), with a small capped bias for the direct lane
-            # opponent. Added to inhouse_modifier (NOT base_seed); elo is then
-            # recomputed = base_seed + modifier. Each player gets ONE update for
-            # the whole series (2-0 = 1.0 actual, 2-1 = 0.667, etc.).
-            for role, role_rating in t1_role_ratings.items():
-                pid = team1[role]
-                _, role_delta = update_elo_team_series(
-                    team_avg=t1_role_avg, opp_team_avg=t2_role_avg,
-                    player_elo=t1_role_pre[role], lane_opponent_elo=t2_role_pre[role],
-                    player_team_wins=team1_wins, opponent_team_wins=team2_wins,
-                    games_played=role_rating.games_played,
-                )
-                role_rating.inhouse_modifier += role_delta
-                role_rating.elo = role_rating.base_seed + role_rating.inhouse_modifier
-                role_rating.games_played += 1
-
-                overall = t1_overall[pid]
-                _, overall_delta = update_elo_team_series(
-                    team_avg=t1_overall_avg, opp_team_avg=t2_overall_avg,
-                    player_elo=t1_overall_pre[pid], lane_opponent_elo=t2_overall_pre[team2[role]],
-                    player_team_wins=team1_wins, opponent_team_wins=team2_wins,
-                    games_played=overall.games_played,
-                )
-                overall.inhouse_modifier += overall_delta
-                overall.elo = overall.base_seed + overall.inhouse_modifier
-                overall.games_played += 1
-                deltas[pid] = {"role": role_delta, "inhouse": overall_delta}
-
-            for role, role_rating in t2_role_ratings.items():
-                pid = team2[role]
-                _, role_delta = update_elo_team_series(
-                    team_avg=t2_role_avg, opp_team_avg=t1_role_avg,
-                    player_elo=t2_role_pre[role], lane_opponent_elo=t1_role_pre[role],
-                    player_team_wins=team2_wins, opponent_team_wins=team1_wins,
-                    games_played=role_rating.games_played,
-                )
-                role_rating.inhouse_modifier += role_delta
-                role_rating.elo = role_rating.base_seed + role_rating.inhouse_modifier
-                role_rating.games_played += 1
-
-                overall = t2_overall[pid]
-                _, overall_delta = update_elo_team_series(
-                    team_avg=t2_overall_avg, opp_team_avg=t1_overall_avg,
-                    player_elo=t2_overall_pre[pid], lane_opponent_elo=t1_overall_pre[team1[role]],
-                    player_team_wins=team2_wins, opponent_team_wins=team1_wins,
-                    games_played=overall.games_played,
-                )
-                overall.inhouse_modifier += overall_delta
-                overall.elo = overall.base_seed + overall.inhouse_modifier
-                overall.games_played += 1
-                deltas[pid] = {"role": role_delta, "inhouse": overall_delta}
-
-            # Accumulate this match's balance difficulty on every player's INHOUSE
-            # rating so the leaderboard tiebreaker can reward harder-team players.
+                match.predicted_balance = float(first_balance or 0.0)
             balance = match.predicted_balance or 0.0
-            for overall in {**t1_overall, **t2_overall}.values():
-                overall.total_balance_diff += balance
+            series_winner = 1 if t1_wins > t2_wins else 2
 
-            # Write per-player performance rows. KDA from OCR if available.
-            ocr_by_riot_id = {}
-            if parsed:
-                ocr_by_riot_id = {p.riot_id: p for p in parsed.players if p.riot_id}
+            # Each player's role + team (from the last game they appeared in).
+            role_of: dict[int, str] = {}
+            team_of: dict[int, int] = {}
+            for g in games:
+                for role, pid in g.team1.items():
+                    role_of[pid], team_of[pid] = role, 1
+                for role, pid in g.team2.items():
+                    role_of[pid], team_of[pid] = role, 2
 
-            async def get_kda(pid: int):
-                if not parsed:
-                    return None, None, None
-                player = await db.get(Player, pid)
-                if not player or not player.riot_game_name:
-                    return None, None, None
-                key = f"{player.riot_game_name}#{player.riot_tag_line}"
-                row = ocr_by_riot_id.get(key)
-                if not row:
-                    return None, None, None
-                return row.kills, row.deaths, row.assists
-
-            for role, pid in team1.items():
-                k, d, a = await get_kda(pid)
-                pd = deltas.get(pid, {"role": 0, "inhouse": 0})
+            # One aggregate MatchPerformance per player: summed elo deltas (for
+            # exact /unreport) + their team's series result. Per-game KDA/champ
+            # lives in GameStat, so MatchPerformance KDA stays blank.
+            for pid, cnt in played.items():
+                ov = cache[(pid, INHOUSE_ROLE)]
+                ov.total_balance_diff += balance * cnt  # per game, so the avg stays = balance
                 db.add(MatchPerformance(
-                    match_id=match.id, discord_id=pid, role=role,
-                    kills=k, deaths=d, assists=a, won=team1_won,
-                    role_elo_delta=pd["role"], inhouse_elo_delta=pd["inhouse"],
-                ))
-            for role, pid in team2.items():
-                k, d, a = await get_kda(pid)
-                pd = deltas.get(pid, {"role": 0, "inhouse": 0})
-                db.add(MatchPerformance(
-                    match_id=match.id, discord_id=pid, role=role,
-                    kills=k, deaths=d, assists=a, won=not team1_won,
-                    role_elo_delta=pd["role"], inhouse_elo_delta=pd["inhouse"],
+                    match_id=match.id, discord_id=pid, role=role_of[pid],
+                    kills=None, deaths=None, assists=None,
+                    won=(team_of[pid] == series_winner),
+                    role_elo_delta=deltas[pid]["role"], inhouse_elo_delta=deltas[pid]["inhouse"],
                 ))
 
-            match.winner = 1 if team1_wins > team2_wins else 2
-            match.team1_wins = team1_wins
-            match.team2_wins = team2_wins
+            match.winner = series_winner
+            match.team1_wins = t1_wins
+            match.team2_wins = t2_wins
             match.reported_by = admin_id
             match.reported_at = datetime.utcnow()
             match.screenshot_url = screenshot_url
 
-            # If this match was tied to a session, mark the session completed.
-            # Pickup matches have no session, so skip this step.
             if match.session_id is not None:
                 session = await db.get(InhouseSession, match.session_id)
                 if session and session.status == "matched":
