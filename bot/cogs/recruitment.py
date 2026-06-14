@@ -52,13 +52,15 @@ log = logging.getLogger(__name__)
 
 
 def upcoming_recruit_thursdays(
-    today: date, horizon_days: int = 13, min_lead_days: int = 4
+    today: date, horizon_days: int = 6, min_lead_days: int = 4
 ) -> list[date]:
     """Thursdays whose recruitment window is still meaningfully open: at least
     `min_lead_days` out (signups close the Monday 3 days before, so a Thursday
-    only 0-3 days away has no real window left) and within `horizon_days`. Used to
-    self-heal missed auto-posts without clobbering an imminent Thursday an admin
-    may want to post manually / open-ended."""
+    only 0-3 days away has no real window left) and within `horizon_days`. The
+    6-day horizon means the Friday cron posts only the *following* Thursday (one
+    week out), not the Thursday-after-next. Used to self-heal missed auto-posts
+    without clobbering an imminent Thursday an admin may want to post manually /
+    open-ended."""
     out = []
     for ahead in range(min_lead_days, horizon_days + 1):
         d = today + timedelta(days=ahead)
@@ -435,7 +437,7 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
             )
             embed.set_footer(
                 text=f"Match {match.id} · Session #{session.id} (Option {label}) · "
-                     f"{balance_part} · Game time: Thu 9:30 PM ET"
+                     f"{balance_part} · Game time: Thu 9:00 PM ET"
             )
             await channel.send(content="🔒 Teams finalized:", embed=embed)
 
@@ -516,7 +518,7 @@ def _build_public_embed(
     )
 
     embed = discord.Embed(
-        title=f"🎮 Inhouse — Thursday {game_date.strftime('%b %d, %Y')} @ 9:30 PM ET",
+        title=f"🎮 Inhouse — Thursday {game_date.strftime('%b %d, %Y')} @ 9:00 PM ET",
         description=(
             f"Click a button below to RSVP. **Your role choice is private** "
             f"(only you and the bot will see it).\n\n{close_line}"
@@ -1395,6 +1397,6 @@ class RecruitmentCog(commands.Cog):
         embed.add_field(name=f"🔴 {TEAM_NAMES[2]} (Red)", value=_team_lines(proposal.team2.by_role), inline=True)
         embed.set_footer(
             text=f"Match {match.id} · {_balance_footer(proposal)} · "
-                 f"Game time: Thu 9:30 PM ET"
+                 f"Game time: Thu 9:00 PM ET"
         )
         return embed

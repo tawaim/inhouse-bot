@@ -1,6 +1,6 @@
 """Scheduler: cron jobs for recruitment lifecycle.
 
-  Friday  09:00 ET  ->  post recruitment for the Thursday 13 days from now
+  Friday  09:00 ET  ->  post recruitment for the following Thursday (6 days out)
   Monday  21:30 ET  ->  close THIS Thursday's session, run matchmaker, post teams
 """
 from __future__ import annotations
@@ -21,10 +21,10 @@ from bot.db.session import get_session
 log = logging.getLogger(__name__)
 
 
-def next_thursday_after(d: date, days_ahead: int = 13) -> date:
+def next_thursday_after(d: date, days_ahead: int = 6) -> date:
     """Return the date `days_ahead` days from `d`, then snap to next Thursday
-    if it isn't one. With days_ahead=13 from a Friday, the result IS the
-    Thursday-after-next, no snap needed — but we snap defensively in case
+    if it isn't one. With days_ahead=6 from a Friday, the result IS the
+    following Thursday, no snap needed — but we snap defensively in case
     the job runs on the wrong day (e.g., admin manually fires it).
     """
     target = d + timedelta(days=days_ahead)

@@ -156,7 +156,7 @@ Configures which channel the bot uses for various purposes.
 
 **`recruit`** — Where the **scheduled Friday 9 AM** job posts its recruitment message, and where `/recruit-now` posts by default (unless you pass it an explicit `channel`). **Required for auto-posting:** if no recruit channel is set, the bot skips auto-posting (with a log warning) rather than posting to an arbitrary channel — so set this before relying on the weekly cron.
 
-> **Auto-post is now self-healing.** On startup the bot ensures any upcoming Thursday whose recruitment window has opened (within ~13 days) has a recruitment posted, so a missed Friday cron run (e.g. the host restarted at 9 AM) is recovered on the next boot instead of being skipped. The Friday cron and startup both run the same reconciliation.
+> **Auto-post is now self-healing.** On startup the bot ensures any upcoming Thursday whose recruitment window has opened (within ~6 days) has a recruitment posted, so a missed Friday cron run (e.g. the host restarted at 9 AM) is recovered on the next boot instead of being skipped. The Friday cron and startup both run the same reconciliation.
 
 **`results`** — Currently scaffolded but not actively used. Match outcomes are posted in the same channel as the recruitment.
 
@@ -380,7 +380,7 @@ These run automatically based on cron triggers:
 
 ### Friday 9:00 AM ET — Post recruitment
 
-Posts a new recruitment message in the configured `recruit` channel for the Thursday **13 days out** (the Thursday-after-next).
+Posts a new recruitment message in the configured `recruit` channel for the **following Thursday** (6 days out). Signups for it close the Monday 9:30 PM before that Thursday.
 
 If no `recruit` channel is configured, falls back to the first channel where the bot has send permission.
 

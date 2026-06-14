@@ -72,10 +72,10 @@ def test_no_allorim_is_plain_first_ten():
 
 
 def test_team_lines_render_top_down():
-    """Rosters always render TOP, JUNGLE, MID, BOT, SUPPORT regardless of the
-    dict's insertion order."""
+    """Rosters always render top-down (TOP, JUNGLE, MID, BOT, SUPPORT) using the
+    short role labels, regardless of the dict's insertion order."""
     by_role = {"SUPPORT": 5, "MID": 3, "TOP": 1, "BOT": 4, "JUNGLE": 2}
     out = _team_lines(by_role, emoji=False)
     roles_in_order = [line.split("**")[1] for line in out.splitlines()]
-    assert roles_in_order == ["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]
+    assert roles_in_order == ["TOP", "JUN", "MID", "BOT", "SUP"]
     assert out.splitlines()[0] == "**TOP**: <@1>"

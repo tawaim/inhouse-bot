@@ -4,13 +4,13 @@ from datetime import date, timedelta
 from bot.services.scheduler import next_thursday_after
 
 
-def test_friday_plus_13_lands_on_thursday():
-    """The Friday job posts for the Thursday 13 days out — must be a Thursday."""
+def test_friday_plus_6_lands_on_following_thursday():
+    """The Friday job posts for the Thursday 6 days out — must be a Thursday."""
     friday = date(2026, 5, 22)  # a Friday (weekday 4)
     assert friday.weekday() == 4
-    target = next_thursday_after(friday, days_ahead=13)
+    target = next_thursday_after(friday, days_ahead=6)
     assert target.weekday() == 3            # Thursday
-    assert target == friday + timedelta(days=13)  # no snap needed from a Friday
+    assert target == friday + timedelta(days=6)  # no snap needed from a Friday
 
 
 def test_result_is_always_a_thursday_from_any_day():
@@ -18,7 +18,7 @@ def test_result_is_always_a_thursday_from_any_day():
     start = date(2026, 1, 1)
     for offset in range(14):
         d = start + timedelta(days=offset)
-        target = next_thursday_after(d, days_ahead=13)
+        target = next_thursday_after(d, days_ahead=6)
         assert target.weekday() == 3
         # And it's never in the past relative to d.
         assert target >= d
@@ -39,12 +39,22 @@ def test_upcoming_recruit_thursdays_skips_imminent():
     from bot.cogs.recruitment import upcoming_recruit_thursdays
     got = upcoming_recruit_thursdays(date(2026, 5, 25))  # Monday
     assert date(2026, 5, 28) not in got    # 3 days out — skipped
-    assert date(2026, 6, 4) in got         # 10 days out — auto-posted
+    assert all(d.weekday() == 3 for d in got)
+
+
+def test_upcoming_recruit_thursdays_posts_only_following_thursday():
+    """The Friday cron posts the following Thursday (6 days out) and NOT the
+    Thursday-after-next — no more posting two weeks in advance."""
+    from bot.cogs.recruitment import upcoming_recruit_thursdays
+    friday = date(2026, 5, 22)  # a Friday
+    got = upcoming_recruit_thursdays(friday)
+    assert date(2026, 5, 28) in got        # following Thursday (6 days out) — posted
+    assert date(2026, 6, 4) not in got     # Thursday-after-next (13 days) — NOT posted
     assert all(d.weekday() == 3 for d in got)
 
 
 def test_upcoming_recruit_thursdays_within_lead_and_horizon():
     from bot.cogs.recruitment import upcoming_recruit_thursdays
-    base = date(2026, 5, 25)
+    base = date(2026, 5, 22)
     got = upcoming_recruit_thursdays(base)
-    assert all(4 <= (d - base).days <= 13 for d in got)
+    assert all(4 <= (d - base).days <= 6 for d in got)
