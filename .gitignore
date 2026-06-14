@@ -27,6 +27,10 @@ data/
 tests/fixtures/scoreboards/
 *.ocr.txt
 
+# Raw downloaded champion icons (re-downloadable from Data Dragon). The hashed
+# library bot/assets/champion_hashes.json IS committed; the PNGs are not.
+bot/assets/champion_icons/
+
 # OS
 .DS_Store
 Thumbs.db

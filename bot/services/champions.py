@@ -43,8 +43,8 @@ CHAMPIONS: list[str] = [
     "Thresh", "Tristana", "Trundle", "Tryndamere", "Twisted Fate", "Twitch",
     "Udyr", "Urgot", "Varus", "Vayne", "Veigar", "Vel'Koz", "Vex", "Vi", "Viego",
     "Viktor", "Vladimir", "Volibear", "Warwick", "Wukong", "Xayah", "Xerath",
-    "Xin Zhao", "Yasuo", "Yone", "Yorick", "Yuumi", "Zac", "Zed", "Zeri",
-    "Ziggs", "Zilean", "Zoe", "Zyra",
+    "Xin Zhao", "Yasuo", "Yone", "Yorick", "Yunara", "Yuumi", "Zaahen", "Zac",
+    "Zed", "Zeri", "Ziggs", "Zilean", "Zoe", "Zyra",
 ]
 
 # Community shorthands -> canonical name. Keys are normalized on load, so case
