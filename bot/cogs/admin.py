@@ -6,6 +6,7 @@ import json
 import logging
 import re
 from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, Optional
 
@@ -617,6 +618,75 @@ async def resolve_name_block(guild: discord.Guild, raw: str) -> tuple[str, list[
             await db.commit()
 
     return "\n".join(out_lines), notes, learned
+
+
+# --- Single-name resolution, reused for screenshot player identification ------
+
+@dataclass
+class NameMatch:
+    """Result of resolving one in-game/scoreboard name to a Discord player.
+
+    `discord_id` is set only for a CONFIDENT match (stored alias or a unique
+    exact identity hit). Ambiguous, fuzzy, and no-match cases leave it None and
+    surface `candidates` so the caller can offer an ephemeral picker; the chosen
+    member is then saved as an alias so the name auto-resolves next time.
+    """
+    name: str
+    discord_id: Optional[int]
+    confidence: str  # "alias" | "exact" | "ambiguous" | "fuzzy" | "none"
+    candidates: list[int] = field(default_factory=list)
+
+    @property
+    def confident(self) -> bool:
+        return self.discord_id is not None
+
+
+def _resolve_single_name(
+    name: str,
+    alias_map: dict[str, int],
+    index: dict[str, set[int]],
+    keys: list[str],
+) -> NameMatch:
+    """Resolve one name against the alias map + candidate index. Same tiers as
+    resolve_name_block (alias → exact → fuzzy), but returns structured data
+    instead of a rewritten line."""
+    n = _norm_name(name)
+    if not n:
+        return NameMatch(name, None, "none", [])
+    if n in alias_map:
+        did = alias_map[n]
+        return NameMatch(name, did, "alias", [did])
+    if n in index:
+        ids = list(index[n])
+        if len(ids) == 1:
+            return NameMatch(name, ids[0], "exact", ids)
+        return NameMatch(name, None, "ambiguous", ids)
+    cand_ids: list[int] = []
+    for k in difflib.get_close_matches(n, keys, n=5, cutoff=_FUZZY_CUTOFF):
+        for i in index[k]:
+            if i not in cand_ids:
+                cand_ids.append(i)
+    if len(cand_ids) == 1:
+        return NameMatch(name, None, "fuzzy", cand_ids)
+    if len(cand_ids) > 1:
+        return NameMatch(name, None, "ambiguous", cand_ids)
+    return NameMatch(name, None, "none", [])
+
+
+async def match_player_names(
+    guild: discord.Guild, names: list[str]
+) -> tuple[list[NameMatch], dict[int, str]]:
+    """Resolve a list of scoreboard names to Discord players. Returns the matches
+    (in input order) plus a {discord_id -> display label} map for rendering."""
+    async with get_session() as db:
+        alias_map = {
+            a.alias_norm: a.discord_id
+            for a in (await db.execute(select(Alias))).scalars().all()
+        }
+        index, labels = await _build_candidate_index(guild, db)
+        keys = list(index.keys())
+        matches = [_resolve_single_name(nm, alias_map, index, keys) for nm in names]
+    return matches, labels
 
 
 class ResolveNamesModal(discord.ui.Modal, title="Resolve names → mentions"):

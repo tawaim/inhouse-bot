@@ -9,7 +9,7 @@ import types
 
 from sqlalchemy import select
 
-from bot.cogs.admin import AdminCog, resolve_name_block
+from bot.cogs.admin import AdminCog, match_player_names, resolve_name_block
 from bot.config import Config
 from bot.db.models import Alias, GuildConfig, Match, Player
 from bot.db.session import close_db, get_session, init_db
@@ -225,6 +225,81 @@ def test_build_channels_no_category_configured(tmp_path):
             dummy = types.SimpleNamespace()
             result = await AdminCog._build_match_channels(dummy, _guild(), 1, match_id=mid)
             assert "No match category configured" in result
+        finally:
+            await close_db()
+
+    asyncio.run(body())
+
+
+# --- match_player_names: screenshot player identification ---------------------
+
+def test_match_names_exact_and_riot(tmp_path):
+    import asyncio
+
+    async def body():
+        await init_db(_config(str(tmp_path / "mn1.db")))
+        try:
+            await _seed_players()
+            # 'Robo' (Riot game name) and 'carter_k' (Discord display name).
+            matches, _labels = await match_player_names(_guild(), ["Robo", "carter_k"])
+            assert matches[0].confident and matches[0].discord_id == 2
+            assert matches[0].confidence == "exact"
+            assert matches[1].confident and matches[1].discord_id == 1
+        finally:
+            await close_db()
+
+    asyncio.run(body())
+
+
+def test_match_names_alias_priority(tmp_path):
+    import asyncio
+
+    async def body():
+        await init_db(_config(str(tmp_path / "mn2.db")))
+        try:
+            await _seed_players()
+            async with get_session() as db:
+                db.add(Alias(alias_norm="robo", discord_id=3, alias="Robo"))
+                await db.commit()
+            matches, _labels = await match_player_names(_guild(), ["Robo"])
+            assert matches[0].discord_id == 3
+            assert matches[0].confidence == "alias"
+        finally:
+            await close_db()
+
+    asyncio.run(body())
+
+
+def test_match_names_unmatched_needs_picker(tmp_path):
+    import asyncio
+
+    async def body():
+        await init_db(_config(str(tmp_path / "mn3.db")))
+        try:
+            await _seed_players()
+            matches, _labels = await match_player_names(_guild(), ["Zzqxywv"])
+            assert not matches[0].confident
+            assert matches[0].confidence == "none"
+            assert matches[0].candidates == []
+        finally:
+            await close_db()
+
+    asyncio.run(body())
+
+
+def test_match_names_fuzzy_not_confident(tmp_path):
+    import asyncio
+
+    async def body():
+        await init_db(_config(str(tmp_path / "mn4.db")))
+        try:
+            await _seed_players()
+            # 'Carte' fuzzes to Carter but isn't a confident match — needs confirm,
+            # with the guess pre-offered as a candidate.
+            matches, _labels = await match_player_names(_guild(), ["Carte"])
+            assert not matches[0].confident
+            assert matches[0].confidence == "fuzzy"
+            assert matches[0].candidates == [1]
         finally:
             await close_db()
 
