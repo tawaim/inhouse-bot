@@ -22,6 +22,11 @@ data/
 *.sqlite
 *.sqlite3
 
+# Private scoreboard screenshots + raw OCR dumps — contain real player names,
+# never commit. Anonymized test fixtures live in tests/fixtures/ocr/ instead.
+tests/fixtures/scoreboards/
+*.ocr.txt
+
 # OS
 .DS_Store
 Thumbs.db

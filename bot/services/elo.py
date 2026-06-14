@@ -246,6 +246,52 @@ def update_elo_team_series(
     return player_elo + delta, delta
 
 
+# ---------- Per-game scoring ("elo follows who actually played each game") ----------
+# A single game is one rating event. Bases are ~half the series bases so that a
+# typical best-of-3 nets about the same TOTAL as the old one-event-per-series
+# model (even teams: per-game win ≈ +14, so a 2-0 sums to ≈ +28 and a 2-1 nets
+# ≈ +14 — in the same ballpark as the old +28 / +18). This lets a sub earn elo
+# only for the games they actually played without inflating the ladder.
+GAME_WIN_BASE = 14     # points for a single-game win vs an evenly-rated team
+GAME_UPSET_K = 16      # extra for winning as the rating underdog (peaks)
+GAME_FAVORED_K = 9     # how much a favorite's single-game gain is shaved
+GAME_WIN_FLOOR = 7     # a game win never nets below this (pre lane nudge)
+GAME_LANE_BIAS_K = 10  # weight on relative lane difficulty for this game
+GAME_LANE_BIAS_CAP = 3 # max points the lane term can shift one player per game
+
+
+def update_elo_team_game(
+    team_avg: int,
+    opp_team_avg: int,
+    player_elo: int,
+    lane_opponent_elo: int,
+    won: bool,
+) -> tuple[int, int]:
+    """Points for one player from a SINGLE game's team-vs-team result.
+
+    Same shape as update_elo_team_series but for one game (no sweep/narrow
+    distinction — a game is a game) and with the smaller per-game bases above.
+    A win never goes negative and a loss never goes positive. Returns
+    (new_elo, delta).
+    """
+    e_team = expected_score(team_avg, opp_team_avg)
+    favored = e_team - 0.5  # >0 = rating favorite, <0 = underdog
+    base = GAME_WIN_BASE
+    if won:
+        team_delta = base + GAME_UPSET_K * max(0.0, -favored) - GAME_FAVORED_K * max(0.0, favored)
+        team_delta = max(team_delta, float(GAME_WIN_FLOOR))
+    else:
+        team_delta = -(base + GAME_UPSET_K * max(0.0, favored) - GAME_FAVORED_K * max(0.0, -favored))
+        team_delta = min(team_delta, float(-GAME_WIN_FLOOR))
+
+    e_lane = expected_score(player_elo, lane_opponent_elo)
+    lane_term = GAME_LANE_BIAS_K * (e_team - e_lane)
+    lane_term = max(-GAME_LANE_BIAS_CAP, min(GAME_LANE_BIAS_CAP, lane_term))
+
+    delta = round(team_delta + lane_term)
+    return player_elo + delta, delta
+
+
 def parse_series_score(score: str) -> tuple[int, int]:
     """Parse '2-0', '2-1', '1-2', '0-2' (or '2:0' etc.) into (team1_wins, team2_wins).
     Returns (-1, -1) on invalid input.

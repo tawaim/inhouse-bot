@@ -111,6 +111,39 @@ def test_full_matchup_team_avg_diff():
     assert 3 <= delta <= 7
 
 
+def test_game_even_teams_win_and_loss_symmetric():
+    """Even teams, even lanes: a single-game win ≈ +GAME_WIN_BASE, loss ≈ -same."""
+    from bot.services.elo import update_elo_team_game, GAME_WIN_BASE
+    _, win = update_elo_team_game(1500, 1500, 1500, 1500, won=True)
+    _, loss = update_elo_team_game(1500, 1500, 1500, 1500, won=False)
+    assert win == GAME_WIN_BASE
+    assert loss == -GAME_WIN_BASE
+
+
+def test_game_series_magnitude_in_old_ballpark():
+    """A 2-0 of even teams summed per game lands near the old series sweep (~+28)."""
+    from bot.services.elo import update_elo_team_game
+    _, g1 = update_elo_team_game(1500, 1500, 1500, 1500, won=True)
+    _, g2 = update_elo_team_game(1500, 1500, 1500, 1500, won=True)
+    assert 24 <= g1 + g2 <= 32  # old WIN_BASE_SWEEP was 28
+
+
+def test_game_win_never_negative_loss_never_positive():
+    """Even a heavy favorite winning stays >0; an underdog losing stays <0."""
+    from bot.services.elo import update_elo_team_game
+    _, fav_win = update_elo_team_game(2000, 1200, 2000, 1200, won=True)
+    _, dog_loss = update_elo_team_game(1200, 2000, 1200, 2000, won=False)
+    assert fav_win > 0
+    assert dog_loss < 0
+
+
+def test_game_underdog_win_pays_more_than_favorite_win():
+    from bot.services.elo import update_elo_team_game
+    _, dog = update_elo_team_game(1300, 1700, 1300, 1700, won=True)
+    _, fav = update_elo_team_game(1700, 1300, 1700, 1300, won=True)
+    assert dog > fav
+
+
 def test_past_season_is_division_aware():
     """Past-season seed starts from the exact tier+division ladder value."""
     from bot.services.elo import seed_from_past_season
