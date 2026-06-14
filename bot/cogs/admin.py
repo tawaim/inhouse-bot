@@ -847,9 +847,14 @@ class AdminCog(commands.Cog):
         name: str,
         roster: dict[str, int],
         admin_role: Optional[discord.Role],
+        enemy_name: Optional[str] = None,
+        enemy_roster: Optional[dict[str, int]] = None,
     ) -> str:
         """Create-or-reuse the team's role + private channel, assign the role to
-        the roster's members, and post an intro. Returns a one-line summary."""
+        the roster's members, and post an intro. Returns a one-line summary.
+
+        If enemy_name/enemy_roster are given, the intro also lists the opposing
+        team by role so players have the matchups handy in their own channel."""
         # Role: reuse a same-named one if present, else create it.
         role = discord.utils.get(guild.roles, name=name)
         if role is None:
@@ -887,7 +892,12 @@ class AdminCog(commands.Cog):
             await channel.edit(overwrites=overwrites)
 
         mentions = " ".join(m.mention for m in added) or "_(no members found)_"
-        await channel.send(f"**{name}** — your team for this match: {mentions}")
+        message = f"**{name}** — your team for this match: {mentions}"
+        if enemy_roster:
+            enemy_block = format_team_lines(enemy_roster, emoji=True)
+            enemy_label = f"enemy team ({enemy_name})" if enemy_name else "enemy team"
+            message += f"\n\n__Vs. {enemy_label}:__\n{enemy_block}"
+        await channel.send(message)
         miss = f", {missing} not in server" if missing else ""
         return f"• {channel.mention} ({role.mention}) — {len(added)} added{miss}"
 
@@ -919,10 +929,14 @@ class AdminCog(commands.Cog):
         admin_role = discord.utils.get(guild.roles, name=self.config.admin_role_name)
         try:
             lines = []
-            for team_no, roster in ((1, team1), (2, team2)):
+            for team_no, roster, enemy_no, enemy_roster in (
+                (1, team1, 2, team2),
+                (2, team2, 1, team1),
+            ):
                 lines.append(
                     await self._create_team_channel(
-                        guild, category, TEAM_NAMES[team_no], roster, admin_role
+                        guild, category, TEAM_NAMES[team_no], roster, admin_role,
+                        enemy_name=TEAM_NAMES[enemy_no], enemy_roster=enemy_roster,
                     )
                 )
         except discord.Forbidden:
