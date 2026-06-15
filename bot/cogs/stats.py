@@ -20,7 +20,7 @@ class StatsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="leaderboard", description="Inhouse leaderboard ranked by individual game wins.")
+    @app_commands.command(name="leaderboard", description="Inhouse leaderboard ranked by net wins (wins − losses).")
     @app_commands.describe(role="Filter by a specific role (optional)")
     async def leaderboard(
         self,
@@ -28,6 +28,12 @@ class StatsCog(commands.Cog):
         role: Optional[Literal["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]] = None,
     ):
         await interaction.response.defer()
+        guild = interaction.guild
+        if guild is not None and not guild.chunked:
+            try:
+                await guild.chunk()  # populate member cache so display names resolve
+            except Exception:
+                pass
         async with get_session() as db:
             perf_stmt = (
                 select(MatchPerformance, Match)
@@ -50,42 +56,60 @@ class StatsCog(commands.Cog):
                 for p in (await db.execute(select(Player))).scalars().all()
             }
 
-        # Aggregate per player.
+        # Aggregate per player. Track game wins AND losses so we can rank by net
+        # (wins - losses): raw win COUNT rewards volume (a 1-3 player floats up on
+        # accumulated wins), while net goes negative for losing records and ranks
+        # an 8-3 above a 1-0 above a 1-3.
         stats: dict[int, dict] = defaultdict(lambda: {
-            "game_wins": 0, "series_wins": 0, "series_losses": 0,
+            "game_wins": 0, "game_losses": 0, "series_wins": 0, "series_losses": 0,
         })
         for perf, match in perf_rows:
             s = stats[perf.discord_id]
+            won_games = max(match.team1_wins, match.team2_wins)
+            lost_games = min(match.team1_wins, match.team2_wins)
             if perf.won:
-                s["game_wins"] += max(match.team1_wins, match.team2_wins)
+                s["game_wins"] += won_games
+                s["game_losses"] += lost_games
                 s["series_wins"] += 1
             else:
-                s["game_wins"] += min(match.team1_wins, match.team2_wins)
+                s["game_wins"] += lost_games
+                s["game_losses"] += won_games
                 s["series_losses"] += 1
 
-        def avg_balance_diff(discord_id: int) -> float:
+        def elo(discord_id: int) -> int:
             r = inhouse_ratings.get(discord_id)
-            if r is None or r.games_played == 0:
-                return 0.0
-            return r.total_balance_diff / r.games_played
+            return r.elo if r else 0
 
+        # Net wins primary; series won as the tiebreaker, then INHOUSE elo.
         ranked = sorted(
             stats.items(),
-            key=lambda kv: (kv[1]["game_wins"], avg_balance_diff(kv[0])),
+            key=lambda kv: (
+                kv[1]["game_wins"] - kv[1]["game_losses"],
+                kv[1]["series_wins"],
+                elo(kv[0]),
+            ),
             reverse=True,
         )
 
         lines = []
         for i, (discord_id, s) in enumerate(ranked, 1):
             player = players.get(discord_id)
-            name = (player.riot_game_name if player and player.riot_game_name
-                    else f"<@{discord_id}>")
+            member = guild.get_member(discord_id) if guild else None
+            if member is not None:
+                raw_name = member.display_name           # Discord server name
+            elif player and player.riot_game_name:
+                raw_name = player.riot_game_name          # fallback: Riot name
+            else:
+                raw_name = f"<@{discord_id}>"             # last resort: mention
+            name = discord.utils.escape_markdown(raw_name) if member or (player and player.riot_game_name) else raw_name
+            gw, gl = s["game_wins"], s["game_losses"]
+            net = gw - gl
             sw, sl = s["series_wins"], s["series_losses"]
             series_total = sw + sl
             series_pct = sw / series_total * 100 if series_total else 0
             lines.append(
-                f"`{i:>2}.` **{name}** · {s['game_wins']} wins"
-                f" · {sw}W-{sl}L series ({series_pct:.0f}%)"
+                f"`{i:>2}.` **{name}** · **{net:+d}** ({gw}-{gl} games)"
+                f" · {sw}-{sl} series ({series_pct:.0f}%) · {elo(discord_id)} elo"
             )
 
         desc = ""
@@ -101,7 +125,7 @@ class StatsCog(commands.Cog):
             description=desc or "No games played yet.",
             color=discord.Color.gold(),
         )
-        embed.set_footer(text="Ranked by individual game wins · tiebreaker: avg team difficulty")
+        embed.set_footer(text="Ranked by net wins (W−L) · tiebreaker: series won")
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(
