@@ -20,12 +20,16 @@ class StatsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="leaderboard", description="Inhouse leaderboard ranked by net wins (wins − losses).")
-    @app_commands.describe(role="Filter by a specific role (optional)")
+    @app_commands.command(name="leaderboard", description="Inhouse leaderboard (net wins by default; sort:elo for rating).")
+    @app_commands.describe(
+        role="Filter by a specific role (optional)",
+        sort="Rank by net wins (default) or INHOUSE elo",
+    )
     async def leaderboard(
         self,
         interaction: discord.Interaction,
         role: Optional[Literal["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]] = None,
+        sort: Optional[Literal["net", "elo"]] = "net",
     ):
         await interaction.response.defer()
         guild = interaction.guild
@@ -80,16 +84,23 @@ class StatsCog(commands.Cog):
             r = inhouse_ratings.get(discord_id)
             return r.elo if r else 0
 
-        # Net wins primary; series won as the tiebreaker, then INHOUSE elo.
-        ranked = sorted(
-            stats.items(),
-            key=lambda kv: (
-                kv[1]["game_wins"] - kv[1]["game_losses"],
-                kv[1]["series_wins"],
-                elo(kv[0]),
-            ),
-            reverse=True,
-        )
+        def net_wins(kv):
+            return kv[1]["game_wins"] - kv[1]["game_losses"]
+
+        if sort == "elo":
+            # Elo primary; net wins then series won as tiebreakers.
+            ranked = sorted(
+                stats.items(),
+                key=lambda kv: (elo(kv[0]), net_wins(kv), kv[1]["series_wins"]),
+                reverse=True,
+            )
+        else:
+            # Net wins primary; series won as the tiebreaker, then INHOUSE elo.
+            ranked = sorted(
+                stats.items(),
+                key=lambda kv: (net_wins(kv), kv[1]["series_wins"], elo(kv[0])),
+                reverse=True,
+            )
 
         lines = []
         for i, (discord_id, s) in enumerate(ranked, 1):
@@ -125,7 +136,10 @@ class StatsCog(commands.Cog):
             description=desc or "No games played yet.",
             color=discord.Color.gold(),
         )
-        embed.set_footer(text="Ranked by net wins (W−L) · tiebreaker: series won")
+        embed.set_footer(
+            text="Ranked by INHOUSE elo · tiebreaker: net wins" if sort == "elo"
+            else "Ranked by net wins (W−L) · tiebreaker: series won"
+        )
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(
