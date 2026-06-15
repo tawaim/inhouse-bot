@@ -1356,6 +1356,68 @@ class AdminCog(commands.Cog):
                 existing.discord_id = discord_id
             await db.commit()
 
+    async def _games_from_gamestats(self, db, match) -> list:
+        """Rebuild the per-game lineups (GameResult list) from a match's saved
+        GameStat rows, so it can be rescored without re-uploading screenshots.
+        GameStat stores role + won + champion + KDA per player per game; the team
+        split comes from the won flag, oriented to the match's teams by roster
+        overlap."""
+        ros1 = set(int(v) for v in json.loads(match.team1_json).values())
+        ros2 = set(int(v) for v in json.loads(match.team2_json).values())
+        rows = (await db.execute(
+            select(GameStat).where(GameStat.match_id == match.id).order_by(GameStat.game_no)
+        )).scalars().all()
+        by_game: dict[int, list] = defaultdict(list)
+        for r in rows:
+            by_game[r.game_no].append(r)
+        games = []
+        for gno in sorted(by_game):
+            g = by_game[gno]
+            win_ids = {r.discord_id for r in g if r.won}
+            winners_are_t1 = len(win_ids & ros1) >= len(win_ids & ros2)
+            games.append(GameResult(
+                winner=1 if winners_are_t1 else 2,
+                team1={r.role: r.discord_id for r in g if r.won == winners_are_t1},
+                team2={r.role: r.discord_id for r in g if r.won != winners_are_t1},
+                champions={r.discord_id: r.champion for r in g if r.champion},
+                kdas={r.discord_id: (r.kills, r.deaths, r.assists)
+                      for r in g if r.kills is not None},
+            ))
+        return games
+
+    @app_commands.command(
+        name="rescore-match",
+        description="(admin) Recompute a reported match's elo with current settings — no re-upload.",
+    )
+    @app_commands.describe(match_id="The match to rescore (uses its saved per-game data)")
+    async def rescore_match(self, interaction: discord.Interaction, match_id: int):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        async with get_session() as db:
+            match = await db.get(Match, match_id)
+            if match is None:
+                await interaction.followup.send(f"Match {match_id} not found.", ephemeral=True)
+                return
+            if match.winner is None:
+                await interaction.followup.send(
+                    f"Match {match_id} isn't reported — nothing to rescore.", ephemeral=True)
+                return
+            games = await self._games_from_gamestats(db, match)
+            screenshot_url = match.screenshot_url
+        if not games:
+            await interaction.followup.send(
+                f"Match {match_id} has no per-game data (reported before per-game tracking). "
+                f"Re-report it with `/report` to rescore.", ephemeral=True)
+            return
+        # Reverse the old elo, then re-apply the same lineups with the current tuning.
+        await self._revert_result(match_id)
+        await self._commit_games(match_id, games, screenshot_url, interaction.user.id)
+        await interaction.followup.send(
+            f"✅ Rescored Match {match_id} with current elo settings ({len(games)} game(s)). "
+            f"Player counts and champions/KDA preserved.", ephemeral=True)
+
     @app_commands.command(
         name="report",
         description="(admin) Report a match from up to 3 game screenshots.",
@@ -1924,21 +1986,18 @@ class AdminCog(commands.Cog):
         screenshot_url: str | None,
         admin_id: int,
     ) -> None:
-        """Apply a match GAME BY GAME to the ACTUAL participants of each game, so
-        a sub earns elo only for the games they played. Writes per-game GameStat
-        rows and one aggregate MatchPerformance row per player (summed elo deltas)
-        so /unreport reverses exactly. games_played counts ACTUAL games.
+        """Apply a match GAME BY GAME. Each game is its own elo event of ~±15 (see
+        update_elo_team_game), so a 2-0 ≈ +30 and a 2-1 nets ≈ +15, and a sub earns
+        elo only for the games they actually played. Writes per-game GameStat rows
+        and one aggregate MatchPerformance per player (summed deltas) so /unreport
+        reverses exactly. games_played counts ACTUAL games.
         """
         if not games:
             return
         async with get_session() as db:
             match = await db.get(Match, match_id)
-            if match is None:
-                return
-            if match.winner is not None:
-                # Already reported. The /report flow checks this before a 120s
-                # reaction wait, so re-check here to avoid double-applying elo.
-                return
+            if match is None or match.winner is not None:
+                return  # not found, or already reported (idempotency guard)
 
             cache: dict[tuple, Rating] = {}
 
@@ -1948,10 +2007,8 @@ class AdminCog(commands.Cog):
                 if r is None:
                     r = await db.get(Rating, key)
                     if r is None:
-                        r = Rating(
-                            discord_id=pid, role=role, elo=DEFAULT_ELO,
-                            base_seed=DEFAULT_ELO, inhouse_modifier=0, games_played=0,
-                        )
+                        r = Rating(discord_id=pid, role=role, elo=DEFAULT_ELO,
+                                   base_seed=DEFAULT_ELO, inhouse_modifier=0, games_played=0)
                         db.add(r)
                     cache[key] = r
                 return r
@@ -1974,8 +2031,7 @@ class AdminCog(commands.Cog):
                 t1_over = {pid: await rget(pid, INHOUSE_ROLE) for pid in t1.values()}
                 t2_over = {pid: await rget(pid, INHOUSE_ROLE) for pid in t2.values()}
 
-                # Pre-game snapshots (all matchup inputs must be pre-game so the two
-                # team loops stay symmetric; ratings only mutate within the loop).
+                # Pre-game snapshots so the two team loops stay symmetric.
                 t1_ravg = average_elo([r.elo for r in t1_role.values()])
                 t2_ravg = average_elo([r.elo for r in t2_role.values()])
                 t1_oavg = average_elo([r.elo for r in t1_over.values()])
@@ -2033,13 +2089,11 @@ class AdminCog(commands.Cog):
                             kills=k[0], deaths=k[1], assists=k[2], won=won,
                         ))
 
-            # predicted_balance: keep an existing value, else use game 1's role gap.
             if match.predicted_balance is None:
                 match.predicted_balance = float(first_balance or 0.0)
             balance = match.predicted_balance or 0.0
             series_winner = 1 if t1_wins > t2_wins else 2
 
-            # Each player's role + team (from the last game they appeared in).
             role_of: dict[int, str] = {}
             team_of: dict[int, int] = {}
             for g in games:
@@ -2048,12 +2102,9 @@ class AdminCog(commands.Cog):
                 for role, pid in g.team2.items():
                     role_of[pid], team_of[pid] = role, 2
 
-            # One aggregate MatchPerformance per player: summed elo deltas (for
-            # exact /unreport) + their team's series result. Per-game KDA/champ
-            # lives in GameStat, so MatchPerformance KDA stays blank.
             for pid, cnt in played.items():
                 ov = cache[(pid, INHOUSE_ROLE)]
-                ov.total_balance_diff += balance * cnt  # per game, so the avg stays = balance
+                ov.total_balance_diff += balance * cnt
                 db.add(MatchPerformance(
                     match_id=match.id, discord_id=pid, role=role_of[pid],
                     kills=None, deaths=None, assists=None,
@@ -2067,7 +2118,6 @@ class AdminCog(commands.Cog):
             match.reported_by = admin_id
             match.reported_at = datetime.utcnow()
             match.screenshot_url = screenshot_url
-
             if match.session_id is not None:
                 session = await db.get(InhouseSession, match.session_id)
                 if session and session.status == "matched":

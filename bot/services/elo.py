@@ -247,17 +247,17 @@ def update_elo_team_series(
 
 
 # ---------- Per-game scoring ("elo follows who actually played each game") ----------
-# A single game is one rating event. Bases are ~half the series bases so that a
-# typical best-of-3 nets about the same TOTAL as the old one-event-per-series
-# model (even teams: per-game win ≈ +14, so a 2-0 sums to ≈ +28 and a 2-1 nets
-# ≈ +14 — in the same ballpark as the old +28 / +18). This lets a sub earn elo
-# only for the games they actually played without inflating the ladder.
-GAME_WIN_BASE = 14     # points for a single-game win vs an evenly-rated team
-GAME_UPSET_K = 16      # extra for winning as the rating underdog (peaks)
-GAME_FAVORED_K = 9     # how much a favorite's single-game gain is shaved
-GAME_WIN_FLOOR = 7     # a game win never nets below this (pre lane nudge)
-GAME_LANE_BIAS_K = 10  # weight on relative lane difficulty for this game
-GAME_LANE_BIAS_CAP = 3 # max points the lane term can shift one player per game
+# Each game is its own elo event worth ~±15: an even-teams win is +15 and a loss
+# −15, so a 2-0 ≈ +30, a 2-1 nets ≈ +15, and a sub earns elo only for the games
+# they played. The rating-gap and lane adjustments are intentionally SMALL so the
+# result stays "around 15" (beating a much stronger team is worth a bit more,
+# weaker a bit less) rather than swinging wildly.
+GAME_WIN_BASE = 15     # points for a single-game win vs an evenly-rated team
+GAME_UPSET_K = 8       # extra for winning as the rating underdog (modest)
+GAME_FAVORED_K = 5     # how much a favorite's single-game gain is shaved (modest)
+GAME_WIN_FLOOR = 10    # a game win never nets below this (pre lane nudge)
+GAME_LANE_BIAS_K = 6   # weight on relative lane difficulty for this game
+GAME_LANE_BIAS_CAP = 2 # max points the lane term can shift one player per game
 
 
 def update_elo_team_game(
