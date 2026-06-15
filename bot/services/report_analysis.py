@@ -31,15 +31,24 @@ class GameResult:
 
 @dataclass
 class SlotProposal:
-    """One resolved roster slot in a game (aligned to the MATCH's team numbers)."""
+    """One roster slot in a game (aligned to the MATCH's team numbers).
+
+    Roster-first: `discord_id` defaults to the rostered player (`rostered_id`) for
+    this role; it differs only when OCR detected a sub or the admin overrode it.
+    """
     team: int                       # 1 or 2 (match team, not screenshot order)
     role: str
     name_guess: str
-    discord_id: Optional[int] = None  # None -> needs the ephemeral picker
+    discord_id: Optional[int] = None    # who gets credit (rostered unless subbed)
+    rostered_id: Optional[int] = None   # the match's default player for this slot
     champion: Optional[str] = None
     kills: Optional[int] = None
     deaths: Optional[int] = None
     assists: Optional[int] = None
+
+    @property
+    def is_sub(self) -> bool:
+        return self.discord_id is not None and self.discord_id != self.rostered_id
 
 
 @dataclass
@@ -94,13 +103,18 @@ def build_game_proposal(
     fixed_team1: dict[str, int],
     fixed_team2: dict[str, int],
 ) -> GameProposal:
-    """Build a GameProposal from one parsed scoreboard.
+    """Build a GameProposal ROSTER-FIRST.
 
-    - Resolves each row's name to a discord_id via `resolve` (None = needs picker).
-    - Aligns the two SCREENSHOT teams to the MATCH's team1/team2 by membership
-      overlap with the fixed roster (so subs, who are in neither, don't flip it).
-    - Assigns roles by row order. Maps the VICTORY/DEFEAT banner to a winner hint
-      (best-effort — the banner is the screenshotter's POV, so the admin confirms).
+    Every slot defaults to the match's rostered player for its role. OCR is used
+    only to:
+      - orient which SCREENSHOT team is which MATCH team (by roster overlap),
+      - flag SUBS: a row that confidently resolves to a *different* known player
+        than the rostered one,
+      - carry KDA onto the row,
+      - hint the winner from the VICTORY/DEFEAT banner (admin confirms).
+
+    So an unreadable screenshot (e.g. the post-game splash screen) still yields the
+    correct lineup from the roster — a no-sub game needs zero player picking.
     """
     prop = GameProposal(notes=list(parsed.notes))
     sb1 = _rows_to_slots(parsed.team1, resolve)
@@ -108,24 +122,33 @@ def build_game_proposal(
     ids1 = [did for _, _, did, _ in sb1]
     ids2 = [did for _, _, did, _ in sb2]
 
-    # Which match-team does SCREENSHOT team 1 correspond to? Pick the alignment
-    # that maximizes roster overlap; ties default to identity (sb1 -> match team1).
+    # Orientation: which match-team does SCREENSHOT team 1 map to? Maximize roster
+    # overlap; ties (and unreadable OCR) default to identity (sb1 -> match team1).
     identity = _overlap(ids1, fixed_team1) + _overlap(ids2, fixed_team2)
     swapped = _overlap(ids1, fixed_team2) + _overlap(ids2, fixed_team1)
     sb1_is_match_team1 = identity >= swapped
 
-    for sb, match_team in ((sb1, 1 if sb1_is_match_team1 else 2),
-                           (sb2, 2 if sb1_is_match_team1 else 1)):
-        for role, name, did, row in sb:
-            prop.slots.append(SlotProposal(
-                team=match_team, role=role, name_guess=name, discord_id=did,
+    rows_for = {1: sb1 if sb1_is_match_team1 else sb2,
+                2: sb2 if sb1_is_match_team1 else sb1}
+    fixed_for = {1: fixed_team1, 2: fixed_team2}
+
+    for team in (1, 2):
+        by_role = {role: (name, did, row) for role, name, did, row in rows_for[team]}
+        for role in ROLES:
+            rostered = fixed_for[team].get(role)
+            name, did, row = by_role.get(role, ("", None, None))
+            slot = SlotProposal(
+                team=team, role=role, name_guess=name,
+                discord_id=rostered, rostered_id=rostered,
                 kills=getattr(row, "kills", None),
                 deaths=getattr(row, "deaths", None),
                 assists=getattr(row, "assists", None),
-            ))
+            )
+            # Sub: OCR confidently read a different known player at this slot.
+            if did is not None and did != rostered:
+                slot.discord_id = did
+            prop.slots.append(slot)
 
-    # Banner -> winner hint, aligned to match teams. VICTORY means screenshot
-    # team 1 won; map that through the alignment. Unknown banner -> no hint.
     if parsed.banner == "VICTORY":
         prop.winner_hint = 1 if sb1_is_match_team1 else 2
     elif parsed.banner == "DEFEAT":

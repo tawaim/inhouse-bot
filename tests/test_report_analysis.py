@@ -83,17 +83,35 @@ def test_proposal_aligns_swapped_screenshot_teams():
     assert prop.winner_hint == 1  # DEFEAT, screenshot-team1 is match-team2
 
 
-def test_proposal_flags_unresolved_for_picker():
+def test_proposal_roster_first_keeps_roster_when_ocr_fails():
+    """Roster-first: a row OCR can't resolve keeps the rostered player (not ⚠️),
+    so an unreadable screenshot still yields a full, committable lineup."""
+    sb = parse_scoreboard_text(SAMPLE)
+    prop = build_game_proposal(sb, lambda n: None, FIXED_T1, FIXED_T2)  # nothing resolves
+    assert not prop.unresolved()  # every slot defaults to its rostered player
+    by = {(s.team, s.role): s for s in prop.slots}
+    assert by[(1, "TOP")].discord_id == 1 and not by[(1, "TOP")].is_sub
+    assert by[(2, "SUPPORT")].discord_id == 10 and not by[(2, "SUPPORT")].is_sub
+
+
+def test_proposal_detects_sub():
+    """A row that resolves to a DIFFERENT known player than the rostered one is
+    flagged as a sub and credited to that player."""
     sb = parse_scoreboard_text(SAMPLE)
 
-    def partial(name):
-        # Bravo can't be matched (e.g. a sub not in the alias index).
-        return None if name.strip().lower() == "bravo" else NAME_TO_ID.get(name.strip().lower())
+    def res(name):
+        n = name.strip().lower()
+        if n == "bravo":            # sub plays jungle instead of rostered #2
+            return 11
+        if n.startswith("charlie"):  # OCR garbage on MID -> keep the roster
+            return None
+        return NAME_TO_ID.get(n)
 
-    prop = build_game_proposal(sb, partial, FIXED_T1, FIXED_T2)
-    un = prop.unresolved()
-    assert len(un) == 1 and un[0].role == "JUNGLE" and un[0].team == 1
-    assert un[0].name_guess == "Bravo"
+    prop = build_game_proposal(sb, res, FIXED_T1, FIXED_T2)
+    by = {(s.team, s.role): s for s in prop.slots}
+    assert by[(1, "JUNGLE")].discord_id == 11 and by[(1, "JUNGLE")].is_sub
+    assert by[(1, "MID")].discord_id == 3 and not by[(1, "MID")].is_sub  # rostered
+    assert not prop.unresolved()
 
 
 # --- ReportState: the working state the confirm View drives -------------------
@@ -113,19 +131,25 @@ def test_state_winner_defaults_to_hint_and_toggles():
     assert st.winners == [2]
 
 
-def test_state_ready_only_after_all_resolved():
+def test_state_ready_roster_first_and_carries_sub():
+    """Roster-first: a state built from proposals is immediately committable (every
+    slot defaults to a rostered player), and a detected sub is credited over the
+    rostered default."""
     sb = parse_scoreboard_text(SAMPLE)
 
-    def partial(name):
-        return None if name.strip().lower() == "bravo" else _resolve(name)
+    def res(name):
+        return 11 if name.strip().lower() == "bravo" else NAME_TO_ID.get(name.strip().lower())
 
-    st = ReportState.from_proposals(99, [build_game_proposal(sb, partial, FIXED_T1, FIXED_T2)])
-    ok, problems = st.ready()
-    assert not ok and problems
-    gi, slot = st.unresolved_slots()[0]
-    st.set_player(gi, slot.team, slot.role, 2)  # resolve the sub
+    st = ReportState.from_proposals(99, [build_game_proposal(sb, res, FIXED_T1, FIXED_T2)])
     ok, problems = st.ready()
     assert ok and not problems
+    g = st.to_game_results()[0]
+    assert g.team1["JUNGLE"] == 11   # sub credited
+    assert g.team1["TOP"] == 1       # rostered elsewhere
+
+    # An admin override of any slot still works (e.g. fixing a missed sub).
+    st.set_player(0, 2, "BOT", 99)
+    assert st.to_game_results()[0].team2["BOT"] == 99
 
 
 def test_state_to_game_results():

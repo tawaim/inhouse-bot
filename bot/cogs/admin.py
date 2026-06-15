@@ -752,9 +752,10 @@ def _report_embed(state: ReportState, labels: dict[int, str]) -> discord.Embed:
             for s in [x for x in g.slots if x.team == team]:
                 who = labels.get(s.discord_id, f"<@{s.discord_id}>") if s.discord_id \
                     else f"⚠️ {s.name_guess or '?'}"
+                mark = " 🔁" if s.is_sub else ""  # subbed-in player (not the rostered one)
                 champ = s.champion or "—"
                 kda = f"{s.kills}/{s.deaths}/{s.assists}" if s.kills is not None else "—"
-                lines.append(f"`{s.role:7}` {who} · {champ} · {kda}")
+                lines.append(f"`{s.role:7}` {who}{mark} · {champ} · {kda}")
         e.add_field(name=f"Game {gi}", value="\n".join(lines), inline=False)
     ok, problems = state.ready()
     e.set_footer(text=("⚠️ " + " · ".join(problems[:3])) if problems
@@ -773,21 +774,53 @@ class _WinnerButton(discord.ui.Button):
         await self.view.refresh(interaction)
 
 
-class _PlayerSelect(discord.ui.UserSelect):
-    def __init__(self, gi: int, slot):
-        super().__init__(
-            placeholder=f"G{gi+1} {slot.role} (read “{slot.name_guess or '?'}”) → pick player",
-            min_values=1, max_values=1,
-        )
-        self.gi, self.slot = gi, slot
+class _SlotSelect(discord.ui.Select):
+    """Pick which roster slot to change. Slots are pre-filled from the match roster,
+    so this is mainly for confirming/correcting subs (listed first) — or fixing the
+    rare slot OCR got wrong."""
+
+    def __init__(self, state: ReportState):
+        slots = [(gi, s) for gi, g in enumerate(state.games) for s in g.slots]
+        slots.sort(key=lambda gs: (not gs[1].is_sub, gs[0], gs[1].team))  # subs first
+        options = []
+        for gi, s in slots[:25]:  # Discord caps a select at 25 options
+            read = s.name_guess or "—"
+            options.append(discord.SelectOption(
+                label=f"G{gi+1} · {TEAM_NAMES[s.team]} · {s.role}"[:100],
+                value=f"{gi}:{s.team}:{s.role}",
+                description=(("SUB → " if s.is_sub else "read: ") + read)[:100],
+            ))
+        super().__init__(placeholder="Change a slot (subs listed first)…",
+                         options=options, row=0)
 
     async def callback(self, interaction: discord.Interaction):
+        gi, team, role = self.values[0].split(":")
+        self.view._sel = (int(gi), int(team), role)
+        self.view.show_fix()
+        await self.view.refresh(interaction)
+
+
+class _SlotPlayerSelect(discord.ui.UserSelect):
+    """Pick the player for the slot chosen in _SlotSelect. Saves the OCR'd name as
+    an alias so that player auto-resolves next time."""
+
+    def __init__(self, sel):
+        gi, _team, role = sel
+        super().__init__(placeholder=f"Set G{gi+1} {role} to…",
+                         min_values=1, max_values=1, row=1)
+        self.sel = sel
+
+    async def callback(self, interaction: discord.Interaction):
+        gi, team, role = self.sel
         member = self.values[0]
         v = self.view
-        v.state.set_player(self.gi, self.slot.team, self.slot.role, member.id)
+        v.state.set_player(gi, team, role, member.id)
         v.labels[member.id] = member.display_name
-        await v.cog._learn_alias(self.slot.name_guess, member.id)
-        v.show_players()  # rebuild (fewer unresolved now)
+        slot = v.state._slot(gi, team, role)
+        if slot and slot.name_guess:
+            await v.cog._learn_alias(slot.name_guess, member.id)
+        v._sel = None
+        v.show_fix()
         await v.refresh(interaction)
 
 
@@ -844,6 +877,7 @@ class ReportConfirmView(discord.ui.View):
         self.labels = labels
         self.screenshot_url = screenshot_url
         self.author_id = author_id
+        self._sel = None  # (game_idx, team, role) currently being edited in fix mode
         self.show_main()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -859,10 +893,9 @@ class ReportConfirmView(discord.ui.View):
         self.clear_items()
         for gi in range(len(self.state.games)):
             self.add_item(_WinnerButton(gi, self.state))
-        fix = discord.ui.Button(label="Fix players", emoji="👤",
+        fix = discord.ui.Button(label="Subs / fix", emoji="🔁",
                                 style=discord.ButtonStyle.primary, row=1)
-        fix.disabled = not self.state.unresolved_slots()
-        fix.callback = self._on_fix_players
+        fix.callback = self._on_fix
         champs = discord.ui.Button(label="Champs / KDA", emoji="⚔️",
                                    style=discord.ButtonStyle.primary, row=1)
         champs.callback = self._on_champions
@@ -875,25 +908,18 @@ class ReportConfirmView(discord.ui.View):
         for b in (fix, champs, commit, cancel):
             self.add_item(b)
 
-    def show_players(self):
+    def show_fix(self):
         self.clear_items()
-        remaining = self.state.unresolved_slots()
-        if not remaining:
-            self.show_main()
-            return
-        # Each UserSelect fills a full action row; Discord allows 5 rows total, so
-        # resolve up to 4 per page and reserve the last row for the Done button.
-        # If more remain, the admin clicks Done → Fix players again for the next batch.
-        for gi, slot in remaining[:4]:
-            self.add_item(_PlayerSelect(gi, slot))
-        more = len(remaining) - 4
-        label = f"Done ({more} more after these)" if more > 0 else "Done"
-        done = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary, row=4)
+        self.add_item(_SlotSelect(self.state))
+        if self._sel is not None:
+            self.add_item(_SlotPlayerSelect(self._sel))
+        done = discord.ui.Button(label="Done", style=discord.ButtonStyle.secondary, row=4)
         done.callback = self._on_done
         self.add_item(done)
 
-    async def _on_fix_players(self, interaction: discord.Interaction):
-        self.show_players()
+    async def _on_fix(self, interaction: discord.Interaction):
+        self._sel = None
+        self.show_fix()
         await self.refresh(interaction)
 
     async def _on_done(self, interaction: discord.Interaction):
