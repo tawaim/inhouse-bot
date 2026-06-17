@@ -238,15 +238,20 @@ class StatsCog(commands.Cog):
             g[0] += 1
             g[1] += 1 if p.won else 0
 
-        # Per-game record + champions: champ -> [games, wins]
+        # Per-game record + champions: champ -> [games, wins, kills, deaths, assists, kda_games]
         g_total = len(gstats)
         g_wins = sum(1 for s in gstats if s.won)
         champ_agg: dict[str, list[int]] = {}
         for s in gstats:
             if s.champion:
-                c = champ_agg.setdefault(s.champion, [0, 0])
+                c = champ_agg.setdefault(s.champion, [0, 0, 0, 0, 0, 0])
                 c[0] += 1
                 c[1] += 1 if s.won else 0
+                if None not in (s.kills, s.deaths, s.assists):
+                    c[2] += s.kills
+                    c[3] += s.deaths
+                    c[4] += s.assists
+                    c[5] += 1
 
         embed = discord.Embed(title=f"📊 {name} — Inhouse Stats", color=discord.Color.blurple())
         elo_txt = str(inhouse.elo) if inhouse else "—"
@@ -284,10 +289,15 @@ class StatsCog(commands.Cog):
             embed.add_field(name="KDA", value="_not recorded yet_", inline=False)
 
         if champ_agg:
-            champ_lines = [
-                f"**{c}** — {w}W–{g - w}L ({g})"
-                for c, (g, w) in sorted(champ_agg.items(), key=lambda kv: (-kv[1][0], kv[0]))
-            ][:12]
+            champ_lines = []
+            for c, (g, w, k, d, a, n) in sorted(
+                champ_agg.items(), key=lambda kv: (-kv[1][0], kv[0])
+            )[:12]:
+                line = f"**{c}** — {w}W–{g - w}L ({g})"
+                if n:
+                    ratio = (k + a) / d if d else float(k + a)
+                    line += f" · {ratio:.2f} KDA ({k}/{d}/{a})"
+                champ_lines.append(line)
             embed.add_field(name="Champions played", value="\n".join(champ_lines), inline=False)
         else:
             embed.add_field(name="Champions played", value="_not recorded yet_", inline=False)
