@@ -103,6 +103,42 @@ def _fix_matches_session_id_nullable(conn) -> None:
     log.info("Schema migration: matches.session_id is now nullable")
 
 
+def _fix_matches_autoincrement(conn) -> None:
+    """Rebuild `matches` with a true AUTOINCREMENT id if it lacks one.
+
+    A plain `INTEGER PRIMARY KEY` reuses the highest freed rowid after a delete,
+    so a deleted match's id gets recycled by the next insert (this is how two
+    different series both became "Match 5"). AUTOINCREMENT tracks a high-water
+    mark in `sqlite_sequence` and never reuses ids. create_all won't alter an
+    existing table, so rebuild it (rename → recreate from the model → copy rows →
+    drop old). Row ids are preserved; copying them seeds sqlite_sequence to the
+    current max. Runs after _add_missing_columns so the old table has every model
+    column to copy across. Data-preserving and idempotent.
+    """
+    insp = inspect(conn)
+    if not insp.has_table("matches"):
+        return
+    row = conn.exec_driver_sql(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='matches'"
+    ).fetchone()
+    if row and "AUTOINCREMENT" in (row[0] or "").upper():
+        return  # already migrated
+
+    log.warning("Schema migration: rebuilding `matches` to add AUTOINCREMENT")
+    old_cols = {c["name"] for c in insp.get_columns("matches")}
+    copy = [c.name for c in Match.__table__.columns if c.name in old_cols]
+    copy_sql = ", ".join(f'"{c}"' for c in copy)
+    conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+    conn.exec_driver_sql("ALTER TABLE matches RENAME TO _matches_old")
+    Match.__table__.create(conn)  # recreate WITH sqlite_autoincrement
+    conn.exec_driver_sql(
+        f"INSERT INTO matches ({copy_sql}) SELECT {copy_sql} FROM _matches_old"
+    )
+    conn.exec_driver_sql("DROP TABLE _matches_old")
+    conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+    log.info("Schema migration: matches.id is now AUTOINCREMENT")
+
+
 async def init_db(config: Config) -> None:
     """Create tables if missing, then run lightweight forward-only migrations."""
     global _engine, _sessionmaker
@@ -112,6 +148,7 @@ async def init_db(config: Config) -> None:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_fix_matches_session_id_nullable)
         await conn.run_sync(_add_missing_columns)
+        await conn.run_sync(_fix_matches_autoincrement)
 
 
 @asynccontextmanager

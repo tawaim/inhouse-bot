@@ -131,6 +131,10 @@ class Match(Base):
     queries that check has-it-been-reported, but the elo math uses the score.
     """
     __tablename__ = "matches"
+    # Real AUTOINCREMENT so a deleted match's id is never recycled. Without this,
+    # SQLite reuses the highest freed rowid — which once produced two "Match 5"s
+    # after a June-4 match was deleted and a June-11 match reclaimed id 5.
+    __table_args__ = {"sqlite_autoincrement": True}
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("sessions.id"), nullable=True)

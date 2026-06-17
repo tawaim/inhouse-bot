@@ -896,10 +896,10 @@ def _format_stat_line(stats: dict) -> str:
     """Render a stats dict as a one-line string. Handles missing KDA gracefully."""
     games = stats["games"]
     if games == 0:
-        return "no games"
+        return "no series"
     wins, losses = stats["wins"], stats["losses"]
     wr = (wins / games * 100) if games else 0
-    line = f"{games} games · {wins}W-{losses}L ({wr:.0f}%)"
+    line = f"{games} series · {wins}W-{losses}L ({wr:.0f}%)"
     if stats["k"] or stats["d"] or stats["a"]:
         avg_k = stats["k"] / games
         avg_d = stats["d"] / games
