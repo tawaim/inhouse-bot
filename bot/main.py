@@ -49,28 +49,14 @@ async def amain() -> None:
     await bot.add_cog(AdminCog(bot, config, riot, opgg))
     await bot.add_cog(StatsCog(bot))
 
-    reconciled = False
-
     @bot.event
     async def on_ready():
-        nonlocal reconciled
         log.info("Logged in as %s (%s)", bot.user, bot.user.id)
         # Sync slash commands to the configured guild for fast iteration
         guild = discord.Object(id=config.discord_guild_id)
         bot.tree.copy_global_to(guild=guild)
         synced = await bot.tree.sync(guild=guild)
         log.info("Synced %d slash commands to guild %s", len(synced), config.discord_guild_id)
-        # Self-heal any auto-posts missed while the bot was down (on_ready can fire
-        # on every reconnect, so guard to run this once per process).
-        if not reconciled:
-            reconciled = True
-            cog = bot.get_cog("RecruitmentCog")
-            if cog is not None:
-                try:
-                    n = await cog.ensure_upcoming_recruitments()
-                    log.info("Startup auto-post reconciliation created %d recruitment(s)", n)
-                except Exception:
-                    log.exception("Startup auto-post reconciliation failed")
 
     scheduler = setup_scheduler(bot, config)
     scheduler.start()

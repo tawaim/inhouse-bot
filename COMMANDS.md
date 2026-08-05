@@ -88,7 +88,7 @@ A player's most recent **individual games** (defaults to you, last 10; `count` u
 
 ### `/recruit-now <game_date> [channel] [open_ended]` (admin)
 
-Manually post a recruitment for a specific Thursday. Useful for testing or filling in if the scheduler missed a Friday.
+Post a recruitment for a specific Thursday. This is the only way recruitments get posted — there is no scheduled auto-post.
 
 **Arguments:**
 - `game_date` — The Thursday in YYYY-MM-DD format (must be a Thursday)
@@ -154,13 +154,9 @@ Configures which channel the bot uses for various purposes.
 - `purpose` — `recruit` or `results`
 - `channel` — The channel to use
 
-**`recruit`** — Where the **scheduled Friday 9 AM** job posts its recruitment message, and where `/recruit-now` posts by default (unless you pass it an explicit `channel`). **Required for auto-posting:** if no recruit channel is set, the bot skips auto-posting (with a log warning) rather than posting to an arbitrary channel — so set this before relying on the weekly cron.
-
-> **Auto-post is now self-healing.** On startup the bot ensures any upcoming Thursday whose recruitment window has opened (within ~6 days) has a recruitment posted, so a missed Friday cron run (e.g. the host restarted at 9 AM) is recovered on the next boot instead of being skipped. The Friday cron and startup both run the same reconciliation.
+**`recruit`** — Where `/recruit-now` posts by default (unless you pass it an explicit `channel`).
 
 **`results`** — Currently scaffolded but not actively used. Match outcomes are posted in the same channel as the recruitment.
-
-If you don't configure `recruit`, the Friday job falls back to the first channel where the bot has send permission.
 
 ### `/set-match-category <category>` (admin)
 
@@ -376,13 +372,7 @@ If you don't pick, the proposal sits there forever — no auto-pick.
 
 ## Scheduled jobs (no command)
 
-These run automatically based on cron triggers:
-
-### Friday 9:00 AM ET — Post recruitment
-
-Posts a new recruitment message in the configured `recruit` channel for the **following Thursday** (6 days out). Signups for it close the Monday 9:30 PM before that Thursday.
-
-If no `recruit` channel is configured, falls back to the first channel where the bot has send permission.
+These run automatically based on cron triggers. (Recruitments themselves are posted manually via `/recruit-now` — there is no auto-post job.)
 
 ### Monday 9:30 PM ET — Close signups, send proposals
 

@@ -1,6 +1,7 @@
 """Admin commands: result reporting, channel config, rank syncing."""
 from __future__ import annotations
 
+import asyncio
 import difflib
 import json
 import logging
@@ -1464,10 +1465,15 @@ class AdminCog(commands.Cog):
         resolve, labels = await self._build_resolver(guild)
 
         attachments = [a for a in (game1, game2, game3) if a is not None]
-        proposals = []
-        for att in attachments:
-            parsed = parse_scoreboard_image(await att.read())
-            proposals.append(build_game_proposal(parsed, resolve, fixed_t1, fixed_t2))
+        images = [await att.read() for att in attachments]
+        # Vision reads are blocking HTTP calls — run them off the event loop and
+        # concurrently (one per uploaded game) so the bot stays responsive.
+        parsed_list = await asyncio.gather(
+            *(asyncio.to_thread(parse_scoreboard_image, b) for b in images)
+        )
+        proposals = [
+            build_game_proposal(p, resolve, fixed_t1, fixed_t2) for p in parsed_list
+        ]
 
         state = ReportState.from_proposals(match_id, proposals)
         view = ReportConfirmView(self, state, labels, game1.url, interaction.user.id)

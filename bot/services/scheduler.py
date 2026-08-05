@@ -1,12 +1,13 @@
 """Scheduler: cron jobs for recruitment lifecycle.
 
-  Friday  09:00 ET  ->  post recruitment for the following Thursday (6 days out)
   Monday  21:30 ET  ->  close THIS Thursday's session, run matchmaker, post teams
+
+Recruitments are posted manually via /recruit-now — there is no auto-post.
 """
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 import discord
 import pytz
@@ -21,34 +22,9 @@ from bot.db.session import get_session
 log = logging.getLogger(__name__)
 
 
-def next_thursday_after(d: date, days_ahead: int = 6) -> date:
-    """Return the date `days_ahead` days from `d`, then snap to next Thursday
-    if it isn't one. With days_ahead=6 from a Friday, the result IS the
-    following Thursday, no snap needed — but we snap defensively in case
-    the job runs on the wrong day (e.g., admin manually fires it).
-    """
-    target = d + timedelta(days=days_ahead)
-    # Thursday is weekday 3 (Mon=0)
-    days_to_thursday = (3 - target.weekday()) % 7
-    return target + timedelta(days=days_to_thursday)
-
-
 def setup_scheduler(bot: discord.Client, config: Config) -> AsyncIOScheduler:
     tz = pytz.timezone(config.timezone)
     scheduler = AsyncIOScheduler(timezone=tz)
-
-    async def friday_recruit_job() -> None:
-        from bot.cogs.recruitment import RecruitmentCog
-        cog = bot.get_cog("RecruitmentCog")
-        if not isinstance(cog, RecruitmentCog):
-            log.error("RecruitmentCog not loaded; skipping recruit job")
-            return
-        try:
-            # Posts the newly-opened Thursday (and backfills any earlier missed one).
-            posted = await cog.ensure_upcoming_recruitments()
-            log.info("Friday recruit job posted %d recruitment(s)", posted)
-        except Exception:
-            log.exception("Failed to post recruitment")
 
     async def monday_close_job() -> None:
         from bot.cogs.recruitment import RecruitmentCog
@@ -79,17 +55,6 @@ def setup_scheduler(bot: discord.Client, config: Config) -> AsyncIOScheduler:
 
     # misfire_grace_time lets a run that's slightly late (busy loop, brief downtime)
     # still fire instead of being dropped; coalesce collapses pile-ups into one run.
-    # (Hard catch-up across longer downtime is handled by the startup reconciliation
-    # in ensure_upcoming_recruitments — the in-memory job store has no run history.)
-    # Friday 9:00 AM (Mon=0..Sun=6, Friday=4)
-    scheduler.add_job(
-        friday_recruit_job,
-        CronTrigger(day_of_week="fri", hour=9, minute=0),
-        id="friday_recruit",
-        replace_existing=True,
-        misfire_grace_time=6 * 3600,
-        coalesce=True,
-    )
     # Monday 9:30 PM
     scheduler.add_job(
         monday_close_job,

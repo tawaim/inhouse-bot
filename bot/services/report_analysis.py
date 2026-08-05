@@ -140,6 +140,7 @@ def build_game_proposal(
             slot = SlotProposal(
                 team=team, role=role, name_guess=name,
                 discord_id=rostered, rostered_id=rostered,
+                champion=getattr(row, "champion", None),
                 kills=getattr(row, "kills", None),
                 deaths=getattr(row, "deaths", None),
                 assists=getattr(row, "assists", None),

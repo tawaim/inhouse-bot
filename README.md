@@ -4,7 +4,7 @@ A Discord bot for managing weekly 5v5 League of Legends inhouse leagues. Automat
 
 ## What it does
 
-- **Scheduled recruitment** — Every Friday at 9:00 AM ET, posts a recruitment message for the following Thursday (6 days out). Signups close the Monday before, and the game is the Thursday after that — a one-week Friday→Monday→Thursday cycle.
+- **Recruitment posts** — An admin posts a recruitment for a Thursday with `/recruit-now`. Signups close automatically the Monday 9:30 PM before the game (unless posted open-ended).
 - **Button-based signup** — Players click 🎮 Playing, ❌ Not Playing, or 📺 Commentator. Clicking Playing opens a private (ephemeral) role picker where they toggle TOP / JUNGLE / MID / BOT / SUPPORT / FILL. Role choices stay private; only the public counts are visible.
 - **Top-3 balanced matchmaking** — On Monday at 9:30 PM ET, signups close. The matchmaker enumerates every legal team split with role assignments, scores each by skill balance and role-preference penalty, and DMs the bot owner the top 3 most-balanced options that differ by at least 2 player swaps. The owner picks one with a button click; the chosen teams get posted publicly.
 - **Chess-style Elo** — Each player has 6 ratings: one per role plus an "Inhouse" rating that updates every game. New players are seeded from solo queue rank (Iron 800 → Challenger 2500). K-factor 40 for the first 10 games, 20 thereafter. Beating someone higher-rated gains more; losing to someone lower-rated costs more.
@@ -16,7 +16,7 @@ A Discord bot for managing weekly 5v5 League of Legends inhouse leagues. Automat
 
 - Python 3.11
 - discord.py 2.4 (slash commands, buttons, modals, persistent views)
-- APScheduler (cron-style jobs for the Friday post and Monday close)
+- APScheduler (cron-style job for the Monday close)
 - SQLAlchemy 2.0 + SQLite (async, via aiosqlite)
 - httpx (async Riot API client with rate-limit handling)
 - pytesseract + Pillow (best-effort screenshot OCR for KDA extraction)
@@ -36,7 +36,7 @@ bot/
 │   ├── elo.py           # chess Elo math (expected score, update, K-factor, rank seeding)
 │   ├── matchmaking.py   # top-N team optimizer with diversity enforcement
 │   ├── ocr.py           # Tesseract-based screenshot parser
-│   └── scheduler.py     # APScheduler jobs (Friday recruit, Monday close)
+│   └── scheduler.py     # APScheduler jobs (Monday close)
 └── cogs/
     ├── linking.py       # /link, /link-user, /unlink, /profile, /admin-list-players + approval DMs
     ├── recruitment.py   # button views (RSVP, role picker, proposal choice), session lifecycle
@@ -85,7 +85,7 @@ A full reference lives in [`COMMANDS.md`](./COMMANDS.md). Quick summary:
 - `/sync-ranks` — refresh Riot rank data for all linked players (re-seeds Elo for unplayed roles only)
 - `/admin-list-players [filter]` — list all linked players with their Elo and games played
 - `/link-user @member <riot_id>` — admin-link someone, no approval flow
-- `/set-channel <recruit|results> <channel>` — set the channel the scheduled Friday job posts to
+- `/set-channel <recruit|results> <channel>` — set the default channel `/recruit-now` posts to
 
 **Owner-only DM interactions** (you, set by `OWNER_DISCORD_ID`)
 - Approve/Reject buttons on incoming `/link` requests

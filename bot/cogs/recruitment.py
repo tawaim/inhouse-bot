@@ -2,7 +2,7 @@
 
 Flow
 ----
-Friday 9 AM (or /recruit-now)
+/recruit-now
   -> Bot posts an embed in the recruit channel with 3 buttons:
         🎮 Playing      — opens ephemeral role picker
         ❌ Not Playing   — records them as out
@@ -49,24 +49,6 @@ from bot.services.matchmaking import (
 from bot.cogs.admin import TEAM_NAMES, format_roster_block
 
 log = logging.getLogger(__name__)
-
-
-def upcoming_recruit_thursdays(
-    today: date, horizon_days: int = 6, min_lead_days: int = 4
-) -> list[date]:
-    """Thursdays whose recruitment window is still meaningfully open: at least
-    `min_lead_days` out (signups close the Monday 3 days before, so a Thursday
-    only 0-3 days away has no real window left) and within `horizon_days`. The
-    6-day horizon means the Friday cron posts only the *following* Thursday (one
-    week out), not the Thursday-after-next. Used to self-heal missed auto-posts
-    without clobbering an imminent Thursday an admin may want to post manually /
-    open-ended."""
-    out = []
-    for ahead in range(min_lead_days, horizon_days + 1):
-        d = today + timedelta(days=ahead)
-        if d.weekday() == 3:  # Thursday
-            out.append(d)
-    return out
 
 
 # Allorim is held out of the game unless he's needed to field a full 10 — i.e.
@@ -614,45 +596,6 @@ class RecruitmentCog(commands.Cog):
             await db.commit()
             await db.refresh(session)
         return session
-
-    async def ensure_upcoming_recruitments(self) -> int:
-        """Self-heal: post recruitment for any upcoming Thursday whose window has
-        opened but has no session yet. Called on startup and by the Friday cron, so
-        a missed cron run (e.g. the machine was down at 9 AM Friday) is recovered on
-        the next boot instead of being silently skipped forever.
-
-        No-ops with a warning if no recruit channel is configured — we won't post to
-        an arbitrary fallback channel for an automated action. Returns count posted.
-        """
-        channel = await self._configured_recruit_channel()
-        if channel is None:
-            log.warning(
-                "No recruit channel configured — skipping auto-post. "
-                "Set one with /set-channel recruit."
-            )
-            return 0
-        today = datetime.now(self.tz).date()
-        posted = 0
-        for d in upcoming_recruit_thursdays(today):
-            async with get_session() as db:
-                # A cancelled session doesn't count as "already posted" — if an
-                # admin cancels a recruitment, the date is free to be re-posted
-                # when its window comes around again.
-                exists = (await db.execute(
-                    select(InhouseSession).where(
-                        InhouseSession.game_date == d,
-                        InhouseSession.status != "cancelled",
-                    )
-                )).scalars().first()
-            if exists is not None:
-                continue
-            try:
-                await self.post_recruitment(d, channel=channel)
-                posted += 1
-                log.info("Auto-post: created recruitment for %s", d)
-            except Exception:
-                log.exception("Auto-post: failed to create recruitment for %s", d)
-        return posted
 
     async def close_signups_and_match(self, session_id: int) -> None:
         """Lock the session, refresh everyone's base_seed from current Riot rank,
@@ -1365,17 +1308,6 @@ class RecruitmentCog(commands.Cog):
             return None
         for ch in guild.text_channels:
             if ch.permissions_for(guild.me).send_messages:
-                return ch
-        return None
-
-    async def _configured_recruit_channel(self) -> Optional[discord.TextChannel]:
-        """The explicitly-configured recruit channel only (no random fallback).
-        Auto-posts use this so they never post to an arbitrary channel."""
-        async with get_session() as db:
-            cfg = await db.get(GuildConfig, self.config.discord_guild_id)
-        if cfg and cfg.recruit_channel_id:
-            ch = self.bot.get_channel(cfg.recruit_channel_id)
-            if isinstance(ch, discord.TextChannel):
                 return ch
         return None
 
