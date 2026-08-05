@@ -23,6 +23,7 @@ from bot.services.champions import resolve_champion
 from bot.services.report_analysis import (
     GameResult,
     ReportState,
+    _resolve_name,
     build_game_proposal,
 )
 from bot.services.ocr import parse_scoreboard_image
@@ -952,6 +953,43 @@ class ReportConfirmView(discord.ui.View):
         )
 
 
+class _ScreenshotChannelsConfirmView(discord.ui.View):
+    """Ephemeral confirm step for /match-channels screenshot mode. Nothing is
+    created until the admin clicks Create — same no-auto-commit rule as /report."""
+
+    def __init__(self, cog: "AdminCog", team1: dict[str, int], team2: dict[str, int], author_id: int):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.team1 = team1
+        self.team2 = team2
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "Only the admin who ran the command can confirm.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Create channels", style=discord.ButtonStyle.success, emoji="✅")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+        summary = await self.cog._build_team_channels(
+            interaction.guild, interaction.guild_id, self.team1, self.team2,
+            header="Screenshot",
+        )
+        await interaction.followup.send(summary, ephemeral=True)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="Cancelled — nothing created.", view=self)
+
+
 class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot, config: Config, riot: RiotClient, opgg: OpggClient):
         self.bot = bot
@@ -1194,20 +1232,20 @@ class AdminCog(commands.Cog):
         miss = f", {missing} not in server" if missing else ""
         return f"• {channel.mention} ({role.mention}) — {len(added)} added{miss}"
 
-    async def _build_match_channels(
-        self, guild: discord.Guild, guild_id: int, match_id: int
+    async def _build_team_channels(
+        self,
+        guild: discord.Guild,
+        guild_id: int,
+        team1: dict[str, int],
+        team2: dict[str, int],
+        header: str,
     ) -> str:
-        """Create-or-reuse the per-team roles + private channels for a match and
-        return a human-readable summary (success, or the reason it couldn't).
-        Shared by /match-channels and /manual-match's create_channels flag — does
-        not send any message itself, so callers control the response."""
+        """Create-or-reuse the per-team roles + private channels for the given
+        rosters (role -> discord_id) and return a human-readable summary (success,
+        or the reason it couldn't). Does not send any message itself, so callers
+        control the response."""
         async with get_session() as db:
-            match = await db.get(Match, match_id)
-            if match is None:
-                return f"❌ Match {match_id} not found — channels not created."
             cfg = await db.get(GuildConfig, guild_id)
-            team1 = {k: int(v) for k, v in json.loads(match.team1_json).items()}
-            team2 = {k: int(v) for k, v in json.loads(match.team2_json).items()}
 
         category = (
             guild.get_channel(cfg.match_category_id)
@@ -1216,7 +1254,7 @@ class AdminCog(commands.Cog):
         if not isinstance(category, discord.CategoryChannel):
             return (
                 "⚠️ No match category configured — run `/set-match-category`, "
-                f"then `/match-channels match_id:{match_id}`."
+                "then re-run `/match-channels`."
             )
 
         admin_role = discord.utils.get(guild.roles, name=self.config.admin_role_name)
@@ -1237,22 +1275,107 @@ class AdminCog(commands.Cog):
                 "❌ I lack permission to create roles/channels. Grant me **Manage Roles** + "
                 "**Manage Channels**, and make sure my role sits above the team roles."
             )
-        return f"✅ Match {match_id} team channels ready:\n" + "\n".join(lines)
+        return f"✅ {header} team channels ready:\n" + "\n".join(lines)
+
+    async def _build_match_channels(
+        self, guild: discord.Guild, guild_id: int, match_id: int
+    ) -> str:
+        """Team channels for a saved match's rosters. Shared by /match-channels and
+        /manual-match's create_channels flag."""
+        async with get_session() as db:
+            match = await db.get(Match, match_id)
+            if match is None:
+                return f"❌ Match {match_id} not found — channels not created."
+            team1 = {k: int(v) for k, v in json.loads(match.team1_json).items()}
+            team2 = {k: int(v) for k, v in json.loads(match.team2_json).items()}
+        return await self._build_team_channels(
+            guild, guild_id, team1, team2, header=f"Match {match_id}"
+        )
 
     @app_commands.command(
         name="match-channels",
-        description="(admin) Create private per-team roles + channels for a match.",
+        description="(admin) Create private per-team roles + channels from a match ID or a roster screenshot.",
     )
-    @app_commands.describe(match_id="The match ID to build team channels for")
-    async def match_channels(self, interaction: discord.Interaction, match_id: int):
+    @app_commands.describe(
+        match_id="The match ID to build team channels for",
+        screenshot="Instead of a match ID: an image showing both teams (roster table, lobby, or scoreboard)",
+    )
+    async def match_channels(
+        self,
+        interaction: discord.Interaction,
+        match_id: Optional[int] = None,
+        screenshot: Optional[discord.Attachment] = None,
+    ):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("League Admin only.", ephemeral=True)
             return
+        if (match_id is None) == (screenshot is None):
+            await interaction.response.send_message(
+                "Pass exactly one of `match_id` or `screenshot`.", ephemeral=True
+            )
+            return
         await interaction.response.defer(ephemeral=True)
-        summary = await self._build_match_channels(
-            interaction.guild, interaction.guild_id, match_id
+
+        if match_id is not None:
+            summary = await self._build_match_channels(
+                interaction.guild, interaction.guild_id, match_id
+            )
+            await interaction.followup.send(summary, ephemeral=True)
+            return
+
+        # --- Screenshot path: OCR the two teams, preview, confirm, then build ---
+        guild = interaction.guild
+        if guild is not None and not guild.chunked:
+            try:
+                await guild.chunk()
+            except Exception:
+                log.warning("match-channels: guild chunk failed; matching on cache", exc_info=True)
+        resolve, labels = await self._build_resolver(guild)
+
+        image = await screenshot.read()
+        parsed = await asyncio.to_thread(parse_scoreboard_image, image)
+        if not parsed.team1 and not parsed.team2:
+            note = " ".join(parsed.notes) or "no players read"
+            await interaction.followup.send(
+                f"❌ Couldn't read teams from that image ({note}). "
+                f"Use `/resolve-names` + `/manual-match` instead.", ephemeral=True
+            )
+            return
+
+        team1, team2, preview, unresolved = self._resolve_screenshot_teams(
+            parsed, resolve, labels
         )
-        await interaction.followup.send(summary, ephemeral=True)
+        header = "**Teams read from the screenshot** — confirm to create channels/roles:\n"
+        if parsed.notes:
+            header += "⚠️ " + " ".join(parsed.notes) + "\n"
+        if unresolved:
+            header += (
+                f"⚠️ {len(unresolved)} name(s) I couldn't match will be **skipped** — "
+                f"fix with `/set-alias` and re-run, or confirm without them.\n"
+            )
+        view = _ScreenshotChannelsConfirmView(self, team1, team2, interaction.user.id)
+        await interaction.followup.send(header + preview, view=view, ephemeral=True)
+
+    def _resolve_screenshot_teams(self, parsed, resolve, labels):
+        """Map OCR'd rows (scoreboard order = TOP→SUPPORT) to rosters. Returns
+        (team1, team2, preview_text, unresolved_names)."""
+        unresolved: list[str] = []
+        rosters: dict[int, dict[str, int]] = {1: {}, 2: {}}
+        lines: list[str] = []
+        for team_no, rows in ((1, parsed.team1), (2, parsed.team2)):
+            lines.append(f"\n**{TEAM_NAMES[team_no]}**")
+            for i, role in enumerate(ROLES):
+                if i >= len(rows):
+                    lines.append(f"• {role}: ❓ *(no row read)*")
+                    continue
+                did, shown = _resolve_name(rows[i].name_guess, resolve)
+                if did is not None:
+                    rosters[team_no][role] = did
+                    lines.append(f"• {role}: {labels.get(did, shown)} (read: “{rows[i].name_guess}”)")
+                else:
+                    unresolved.append(rows[i].name_guess)
+                    lines.append(f"• {role}: ❓ couldn't match “{rows[i].name_guess}”")
+        return rosters[1], rosters[2], "\n".join(lines), unresolved
 
     @app_commands.command(
         name="clear-match-channels",

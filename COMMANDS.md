@@ -167,15 +167,16 @@ Sets the Discord **category** under which `/match-channels` creates the per-team
 
 The bot warns immediately if it's missing **Manage Channels** / **Manage Roles** (both are required for `/match-channels`), and its own role must sit **above** the team roles to assign them.
 
-### `/match-channels <match_id>` (admin)
+### `/match-channels [match_id] [screenshot]` (admin)
 
 Creates the two per-team private comms for a match:
 - A Discord **role** per team — `lo gang` (team 1) and `team 10` (team 2) — reused if it already exists. The matching **channels** use the hyphenated form (`lo-gang` / `team-10`) since Discord channel names can't contain spaces.
 - Assigns that role to each of the team's 5 players (members who've left the server are skipped and reported).
 - A **private text channel** per team under the configured category (`/set-match-category`), visible only to that team's role, the bot, and the League Admin role. Posts an intro message tagging the team.
 
-**Arguments:**
+**Arguments (pass exactly one):**
 - `match_id` — the match whose rosters to build channels from (see `/matches`)
+- `screenshot` — an image showing both teams: a roster table/spreadsheet (Team 1 / Team 2 columns with role rows), a lobby list, or a game scoreboard. The bot reads it with vision, resolves each name through the alias index (same names `/resolve-names` accepts), and shows an ephemeral preview — nothing is created until you click **Create channels**. Names it can't match are flagged and skipped; add them with `/set-alias` and re-run, or confirm without them. No match record is created — this only builds channels/roles.
 
 Requires a category set via `/set-match-category` first. Idempotent: re-running reuses existing roles/channels and refreshes their permissions.
 

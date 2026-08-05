@@ -223,6 +223,7 @@ def test_build_channels_no_category_configured(tmp_path):
                 await db.refresh(m)
                 mid = m.id
             dummy = types.SimpleNamespace()
+            dummy._build_team_channels = types.MethodType(AdminCog._build_team_channels, dummy)
             result = await AdminCog._build_match_channels(dummy, _guild(), 1, match_id=mid)
             assert "No match category configured" in result
         finally:

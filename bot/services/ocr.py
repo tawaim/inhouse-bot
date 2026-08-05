@@ -150,19 +150,26 @@ def parse_scoreboard_text(text: str) -> ParsedScoreboard:
 # Vision reading (Claude) — one screenshot -> ParsedScoreboard
 # =============================================================================
 _VISION_PROMPT = (
-    "This image is a League of Legends end-of-game scoreboard (either the in-client "
-    "post-game splash or the full match summary).\n\n"
-    "Extract both teams exactly as displayed. The TOP team is team1, the BOTTOM team "
-    "is team2. Within each team, list the 5 players in the order they appear top to "
-    "bottom — this is role order: TOP, JUNGLE, MID, BOT, SUPPORT.\n\n"
+    "This image shows two teams of League of Legends players. It is usually a League "
+    "end-of-game scoreboard (the in-client post-game splash or full match summary), but "
+    "it can also be a plain roster — e.g. a spreadsheet/table or typed list with two "
+    "team columns or sections and roles labeled top/jung(le)/mid/bot(adc)/supp(ort).\n\n"
+    "Extract both teams exactly as displayed. On a scoreboard, the TOP team is team1 "
+    "and the BOTTOM team is team2. In a roster table, the LEFT column (or first-listed "
+    "section, e.g. 'Team 1') is team1 and the other is team2. Within each team, list "
+    "the 5 players in role order: TOP, JUNGLE, MID, BOT, SUPPORT — on a scoreboard "
+    "that's top-to-bottom display order; in a roster, follow the role labels.\n\n"
     "For each player provide:\n"
     "- name: the player's SUMMONER/account name (the primary player label), NOT the "
     "champion. Copy it exactly, including capitalization, spaces, and underscores.\n"
     "- champion: the champion that player is on. If the champion name is written, use "
-    "it; otherwise identify the champion from the portrait icon.\n"
-    "- kills, deaths, assists: the three K / D / A numbers for that player, in order.\n\n"
+    "it; otherwise identify the champion from the portrait icon. null if the image "
+    "shows no champions (e.g. a roster table).\n"
+    "- kills, deaths, assists: the three K / D / A numbers for that player, in order. "
+    "null if the image shows no KDA.\n\n"
     "Set winning_team to 1 if the top team won or 2 if the bottom team won — decide "
-    "from the VICTORY/DEFEAT banner if present, otherwise from the score/kill totals.\n\n"
+    "from the VICTORY/DEFEAT banner if present, otherwise from the score/kill totals. "
+    "null if the image shows no outcome (e.g. a roster table).\n\n"
     "Read the actual pixels; do not guess or invent players. If a value is unreadable, "
     "use your best read."
 )
@@ -186,10 +193,10 @@ def _player_schema() -> dict:
         "type": "object",
         "properties": {
             "name": {"type": "string"},
-            "champion": {"type": "string"},
-            "kills": {"type": "integer"},
-            "deaths": {"type": "integer"},
-            "assists": {"type": "integer"},
+            "champion": {"type": ["string", "null"]},
+            "kills": {"type": ["integer", "null"]},
+            "deaths": {"type": ["integer", "null"]},
+            "assists": {"type": ["integer", "null"]},
         },
         "required": ["name", "champion", "kills", "deaths", "assists"],
         "additionalProperties": False,
@@ -201,7 +208,7 @@ _BOARD_SCHEMA = {
     "properties": {
         "team1": {"type": "array", "items": _player_schema()},
         "team2": {"type": "array", "items": _player_schema()},
-        "winning_team": {"type": "integer", "enum": [1, 2]},
+        "winning_team": {"type": ["integer", "null"], "enum": [1, 2, None]},
     },
     "required": ["team1", "team2", "winning_team"],
     "additionalProperties": False,
@@ -271,11 +278,12 @@ def parse_scoreboard_image(image_bytes: bytes) -> ParsedScoreboard:
         log.warning("Claude scoreboard output unparseable: %s", e)
         return ParsedScoreboard(notes=["Could not parse the scoreboard — enter the lineup manually."])
 
+    winner = board.get("winning_team")
     sb = ParsedScoreboard(
         raw_text=text,
         team1=[_row(p) for p in (board.get("team1") or [])[:5]],
         team2=[_row(p) for p in (board.get("team2") or [])[:5]],
-        banner="VICTORY" if board.get("winning_team") == 1 else "DEFEAT",
+        banner="VICTORY" if winner == 1 else ("DEFEAT" if winner == 2 else None),
     )
     if len(sb.team1) != 5 or len(sb.team2) != 5:
         sb.notes.append(
