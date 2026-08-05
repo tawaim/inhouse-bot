@@ -208,7 +208,7 @@ _BOARD_SCHEMA = {
     "properties": {
         "team1": {"type": "array", "items": _player_schema()},
         "team2": {"type": "array", "items": _player_schema()},
-        "winning_team": {"type": ["integer", "null"], "enum": [1, 2, None]},
+        "winning_team": {"anyOf": [{"type": "integer", "enum": [1, 2]}, {"type": "null"}]},
     },
     "required": ["team1", "team2", "winning_team"],
     "additionalProperties": False,
