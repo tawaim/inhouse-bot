@@ -53,6 +53,8 @@ class ParsedScoreboard:
     team1: list[ScoreRow] = field(default_factory=list)
     team2: list[ScoreRow] = field(default_factory=list)
     banner: Optional[str] = None  # "VICTORY" (top team won) | "DEFEAT" | None
+    team1_label: Optional[str] = None  # team name from the header, if shown
+    team2_label: Optional[str] = None
     raw_text: str = ""
     notes: list[str] = field(default_factory=list)
 
@@ -159,6 +161,8 @@ _VISION_PROMPT = (
     "section, e.g. 'Team 1') is team1 and the other is team2. Within each team, list "
     "the 5 players in role order: TOP, JUNGLE, MID, BOT, SUPPORT — on a scoreboard "
     "that's top-to-bottom display order; in a roster, follow the role labels.\n\n"
+    "Set team1_name / team2_name to each team's name exactly as written in its header "
+    "or column title (e.g. 'Team 10', 'lo gang'); null if the image shows no team name.\n\n"
     "For each player provide:\n"
     "- name: the player's SUMMONER/account name (the primary player label), NOT the "
     "champion. Copy it exactly, including capitalization, spaces, and underscores.\n"
@@ -209,8 +213,10 @@ _BOARD_SCHEMA = {
         "team1": {"type": "array", "items": _player_schema()},
         "team2": {"type": "array", "items": _player_schema()},
         "winning_team": {"anyOf": [{"type": "integer", "enum": [1, 2]}, {"type": "null"}]},
+        "team1_name": {"type": ["string", "null"]},
+        "team2_name": {"type": ["string", "null"]},
     },
-    "required": ["team1", "team2", "winning_team"],
+    "required": ["team1", "team2", "winning_team", "team1_name", "team2_name"],
     "additionalProperties": False,
 }
 
@@ -284,6 +290,8 @@ def parse_scoreboard_image(image_bytes: bytes) -> ParsedScoreboard:
         team1=[_row(p) for p in (board.get("team1") or [])[:5]],
         team2=[_row(p) for p in (board.get("team2") or [])[:5]],
         banner="VICTORY" if winner == 1 else ("DEFEAT" if winner == 2 else None),
+        team1_label=(board.get("team1_name") or "").strip() or None,
+        team2_label=(board.get("team2_name") or "").strip() or None,
     )
     if len(sb.team1) != 5 or len(sb.team2) != 5:
         sb.notes.append(

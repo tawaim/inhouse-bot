@@ -63,6 +63,19 @@ def team_channel_name(team_name: str) -> str:
     return team_name.lower().replace(" ", "-")
 
 
+def _team_no_for_label(label: Optional[str]) -> Optional[int]:
+    """Map a header label read from a screenshot ('Logang', 'Team 10') to its
+    TEAM_NAMES key, ignoring case/spaces/punctuation. Exact match only, so a
+    generic 'Team 1' doesn't get mistaken for 'team 10'."""
+    norm = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())
+    if not label:
+        return None
+    for team_no, name in TEAM_NAMES.items():
+        if norm(label) == norm(name):
+            return team_no
+    return None
+
+
 async def _safe_fetch_member(guild: discord.Guild, user_id: int) -> Optional[discord.Member]:
     """Return a guild member from cache, falling back to an API fetch. None if
     the user isn't in the server (e.g. they left after the roster was built)."""
@@ -1362,7 +1375,12 @@ class AdminCog(commands.Cog):
         unresolved: list[str] = []
         rosters: dict[int, dict[str, int]] = {1: {}, 2: {}}
         lines: list[str] = []
-        for team_no, rows in ((1, parsed.team1), (2, parsed.team2)):
+        # The image lists teams in display order (left/top first), which may not
+        # match TEAM_NAMES — orient by the header names when they're readable.
+        rows1, rows2 = parsed.team1, parsed.team2
+        if _team_no_for_label(parsed.team1_label) == 2 or _team_no_for_label(parsed.team2_label) == 1:
+            rows1, rows2 = rows2, rows1
+        for team_no, rows in ((1, rows1), (2, rows2)):
             lines.append(f"\n**{TEAM_NAMES[team_no]}**")
             for i, role in enumerate(ROLES):
                 if i >= len(rows):
