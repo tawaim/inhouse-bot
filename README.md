@@ -93,7 +93,7 @@ A full reference lives in [`COMMANDS.md`](./COMMANDS.md). Quick summary:
 - `/link <riot_id>` — submit a link request (admin-approved)
 - `/unlink` — remove your Riot link
 - `/profile [user]` — show ranks, Inhouse Elo, win/loss stats
-- `/leaderboard [role]` — top players by Elo
+- `/leaderboard [role] [sort]` — ranked by series wins (or net games / Elo)
 
 **Admin**
 - `/recruit-now <yyyy-mm-dd>` — manually post a recruitment in the current channel

@@ -42,7 +42,7 @@ async def test_leaderboard_counts_only_games_actually_played(world):
     assert "(1-2 games)" in _line(text, loser.display_name)
     # The sub played one game and lost it: 0-1, not the series' 2-1.
     sub_line = _line(text, sub.display_name)
-    assert "**-1** (0-1 games)" in sub_line and "1-0 series" in sub_line
+    assert "-1 (0-1 games)" in sub_line and "**1-0** series" in sub_line
 
 
 @flow
@@ -118,3 +118,54 @@ async def test_recent_games_orders_by_date_played_not_match_id(world):
     # The limit keeps the most recently PLAYED games.
     text = (await world.run(world.stats.recent_games, user=p, count=2)).text
     assert re.findall(r"`(s\d g\d)`", text) == ["s3 g2", "s3 g1"]
+
+
+async def _series(world, t1_ids, t2_ids, winners):
+    """Record one series between two five-player teams (ids in role order)."""
+    import json
+
+    from bot.cogs.admin import AdminCog, GameResult
+    from bot.db.models import Match
+    from bot.db.session import get_session
+
+    roles = ["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]
+    t1, t2 = dict(zip(roles, t1_ids)), dict(zip(roles, t2_ids))
+    async with get_session() as db:
+        m = Match(session_id=None, team1_json=json.dumps(t1), team2_json=json.dumps(t2))
+        db.add(m)
+        await db.commit()
+        await db.refresh(m)
+    await AdminCog._commit_games(None, m.id, [GameResult(winner=w, team1=t1, team2=t2) for w in winners], None, 1)
+
+
+def _order(text):
+    """Player names in the order the leaderboard lists them."""
+    return [ln.split("**")[1] for ln in text.splitlines() if ln.startswith("`")]
+
+
+@flow
+async def test_leaderboard_default_ranks_by_series_wins_ahead_of_game_record(world):
+    """A player with more series wins ranks above one with a better game differential.
+
+    A = ids 101-105, B = 106-110, C = 111-115.
+      A beats B 2-1, A beats C 2-1, A loses to B 0-2  -> A: 2-1 series, 4-4 games (net  0)
+      C beats B 2-0                                   -> C: 1-1 series, 3-2 games (net +1)
+                                                         B: 1-3 series, 3-6 games (net -3)
+    Series-first puts A above C; the old net-games order put C above A.
+    """
+    players = await world.add_players(15)
+    a, b, c = [p.id for p in players[:5]], [p.id for p in players[5:10]], [p.id for p in players[10:]]
+    await _series(world, a, b, [1, 2, 1])
+    await _series(world, a, c, [1, 2, 1])
+    await _series(world, b, a, [1, 1])
+    await _series(world, c, b, [1, 1])
+
+    default = _order((await world.run(world.stats.leaderboard)).text)
+    assert set(default[:5]) == {f"P{i}" for i in a}          # 2 series wins
+    assert set(default[5:10]) == {f"P{i}" for i in c}        # 1 series win, 1 loss
+    assert set(default[10:]) == {f"P{i}" for i in b}         # 1 series win, 3 losses
+    line = (await world.run(world.stats.leaderboard)).text.splitlines()
+    assert any("**2-1** series" in ln for ln in line)        # series record leads the row
+
+    by_net = _order((await world.run(world.stats.leaderboard, sort="net")).text)
+    assert set(by_net[:5]) == {f"P{i}" for i in c}           # net +1 beats net 0

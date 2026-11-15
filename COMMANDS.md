@@ -50,19 +50,20 @@ Shows the inhouse profile for yourself or another user.
 - Inferred main role from recent ranked games
 - Per-role inhouse elo (μ, σ, conservative skill, games played)
 
-### `/leaderboard [role]`
+### `/leaderboard [role] [sort]`
 
-Shows the inhouse leaderboard.
+Shows the inhouse leaderboard: every player with at least one game, with their series record, game record and overall (INHOUSE) Elo.
 
-**Optional argument:**
-- `role` — Filter to a specific role: `TOP`, `JUNGLE`, `MID`, `BOT`, or `SUPPORT`
+**Optional arguments:**
+- `role` — only count games played in that role: `TOP`, `JUNGLE`, `MID`, `BOT`, or `SUPPORT`
+- `sort` — how to rank:
+  - `series` *(default)* — most series won, then fewest series lost, then net game wins, then Elo
+  - `net` — net game wins (game wins minus losses), then series won, then Elo
+  - `elo` — overall Elo
 
-**Without `role`:** ranks **everyone with a game** by their **overall INHOUSE** elo — games count is each player's **total series across all roles**, with their best role labelled (`· MID`).
-**With `role`:** ranks everyone who's played that role, with that role's elo, games, and W/L.
+Games are counted per game actually played, so a substitute who played one game of a 2-1 gets one game. A series counts for everyone who played at least one game in it.
 
 The list isn't capped — it shows the whole field (trimmed only if it would exceed Discord's message-size limit).
-
-Players with 0 inhouse games played are excluded. Note: a best-of-3 series counts as **one** game.
 
 ### `/elo-history [user]`
 

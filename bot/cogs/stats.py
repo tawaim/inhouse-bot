@@ -20,16 +20,16 @@ class StatsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="leaderboard", description="Inhouse leaderboard (net wins by default; sort:elo for rating).")
+    @app_commands.command(name="leaderboard", description="Inhouse leaderboard (most series wins by default; sort: net games or elo).")
     @app_commands.describe(
         role="Filter by a specific role (optional)",
-        sort="Rank by net wins (default) or INHOUSE elo",
+        sort="Rank by series wins (default), net game wins, or INHOUSE elo",
     )
     async def leaderboard(
         self,
         interaction: discord.Interaction,
         role: Optional[Literal["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]] = None,
-        sort: Optional[Literal["net", "elo"]] = "net",
+        sort: Optional[Literal["series", "net", "elo"]] = "series",
     ):
         await interaction.response.defer()
         guild = interaction.guild
@@ -121,11 +121,19 @@ class StatsCog(commands.Cog):
                 key=lambda kv: (elo(kv[0]), net_wins(kv), kv[1]["series_wins"]),
                 reverse=True,
             )
-        else:
-            # Net wins primary; series won as the tiebreaker, then INHOUSE elo.
+        elif sort == "net":
+            # Net game wins primary; series won as the tiebreaker, then INHOUSE elo.
             ranked = sorted(
                 stats.items(),
                 key=lambda kv: (net_wins(kv), kv[1]["series_wins"], elo(kv[0])),
+                reverse=True,
+            )
+        else:
+            # Default: series victories count more than anything. Most series won,
+            # then fewest series lost, then net game wins, then INHOUSE elo.
+            ranked = sorted(
+                stats.items(),
+                key=lambda kv: (kv[1]["series_wins"], -kv[1]["series_losses"], net_wins(kv), elo(kv[0])),
                 reverse=True,
             )
 
@@ -145,10 +153,16 @@ class StatsCog(commands.Cog):
             sw, sl = s["series_wins"], s["series_losses"]
             series_total = sw + sl
             series_pct = sw / series_total * 100 if series_total else 0
-            lines.append(
-                f"`{i:>2}.` **{name}** · **{net:+d}** ({gw}-{gl} games)"
-                f" · {sw}-{sl} series ({series_pct:.0f}%) · {elo(discord_id)} elo"
-            )
+            if sort in ("net", "elo"):
+                lines.append(
+                    f"`{i:>2}.` **{name}** · **{net:+d}** ({gw}-{gl} games)"
+                    f" · {sw}-{sl} series ({series_pct:.0f}%) · {elo(discord_id)} elo"
+                )
+            else:  # series-first: lead with the series record
+                lines.append(
+                    f"`{i:>2}.` **{name}** · **{sw}-{sl}** series ({series_pct:.0f}%)"
+                    f" · {net:+d} ({gw}-{gl} games) · {elo(discord_id)} elo"
+                )
 
         desc = ""
         for n, ln in enumerate(lines):
