@@ -78,6 +78,11 @@ class ParsedScoreboard:
         return not self.team1 and not self.team2
 
 
+# Kill-total evidence thresholds (see decide_winner).
+KILLS_ONLY_MIN_MARGIN = 5     # without a banner, a smaller lead is too close to call
+KILLS_CONTRADICT_MARGIN = 10  # a lead this big against the banner means a misread
+
+
 def decide_winner(
     team1_kills: Optional[int],
     team2_kills: Optional[int],
@@ -85,30 +90,57 @@ def decide_winner(
     viewer_team: Optional[int],
     model_vote: Optional[int] = None,
 ) -> tuple[Optional[int], Optional[str]]:
-    """Which screenshot team (1 top / 2 bottom) won, from independent evidence:
+    """Which screenshot team (1 top / 2 bottom) won. Returns (winner, note).
 
-      - the header kill totals (the winner almost always has more kills),
-      - the banner applied to the VIEWER's team (the banner is relative to
-        whoever took the screenshot, so it is useless without knowing their team),
-      - the vision model's own conclusion, when there is one.
+    Evidence, strongest first:
 
-    Returns (winner, problem). The winner is set only when every available piece
-    of evidence agrees; if they disagree, or there is none, it is None — the admin
-    picks. `problem` is a human-readable note when the evidence conflicts.
+      1. The VICTORY/DEFEAT banner applied to the VIEWER's team. The banner is the
+         game client's own verdict, but it is relative to whoever took the
+         screenshot, so it only counts when we know which team they were on.
+      2. The header kill totals. Usually the winner has more kills, but not always
+         (a real series here was won 21 kills to 28), so kills never overrule the
+         banner unless the gap is so large that the viewer was probably misread.
+      3. With no banner, kills alone give a hint only when the lead is clear, and
+         the note says it was a guess.
+
+    The admin always confirms the winner; `note` tells them when to look twice.
     """
-    votes: dict[str, int] = {}
-    if team1_kills is not None and team2_kills is not None and team1_kills != team2_kills:
-        votes["kill totals"] = 1 if team1_kills > team2_kills else 2
+    banner_vote = None
     if banner in ("VICTORY", "DEFEAT") and viewer_team in (1, 2):
-        votes["banner"] = viewer_team if banner == "VICTORY" else 3 - viewer_team
-    if model_vote in (1, 2):
-        votes["vision read"] = model_vote
-    picked = set(votes.values())
-    if len(picked) == 1:
-        return picked.pop(), None
-    if len(picked) > 1:
-        detail = ", ".join(f"{k} say team {v}" for k, v in votes.items())
-        return None, f"Couldn't tell who won ({detail}) — set the winner yourself."
+        banner_vote = viewer_team if banner == "VICTORY" else 3 - viewer_team
+    kills_vote, margin = None, 0
+    if team1_kills is not None and team2_kills is not None and team1_kills != team2_kills:
+        kills_vote = 1 if team1_kills > team2_kills else 2
+        margin = abs(team1_kills - team2_kills)
+
+    if banner_vote is not None:
+        if kills_vote in (None, banner_vote):
+            return banner_vote, None
+        if margin >= KILLS_CONTRADICT_MARGIN:
+            return None, (
+                f"Couldn't tell who won: the banner says team {banner_vote} but team "
+                f"{kills_vote} has {margin} more kills — set the winner yourself."
+            )
+        return banner_vote, (
+            f"Team {banner_vote} is marked the winner from the {banner} banner even though "
+            f"team {kills_vote} has {margin} more kills — double-check."
+        )
+
+    if kills_vote is not None:
+        if model_vote in (1, 2) and model_vote != kills_vote:
+            return None, (
+                f"Couldn't tell who won (no usable banner; kill totals say team {kills_vote}, "
+                f"the read says team {model_vote}) — set the winner yourself."
+            )
+        if margin >= KILLS_ONLY_MIN_MARGIN:
+            return kills_vote, (
+                f"No usable banner: team {kills_vote} is a guess from kill totals "
+                f"({team1_kills} vs {team2_kills}) — confirm the winner."
+            )
+        return None, (
+            f"No usable banner and the kill totals are close ({team1_kills} vs {team2_kills}) "
+            f"— set the winner yourself."
+        )
     return None, None
 
 
@@ -216,12 +248,12 @@ def parse_scoreboard_text(text: str) -> ParsedScoreboard:
 # =============================================================================
 _VISION_PROMPT = (
     "This image shows two teams of five League of Legends players. It is one of:\n"
-    "(A) the post-game LOBBY screen: champion names are written as text and each team "
-    "is listed in role order (top, jungle, mid, bot, support);\n"
-    "(B) the MATCH-HISTORY scoreboard: champions appear only as portraits, and one row "
-    "is highlighted (gold text/border) — that row is the VIEWER, the player whose "
-    "client took the screenshot. The viewer is listed FIRST on their own team, out of "
-    "role order;\n"
+    "(A) the post-game LOBBY screen: under each player's name there is a second line "
+    "of text with their champion's name (for example 'RoboDog714' with 'Yone' beneath "
+    "it), and each team is listed in role order (top, jungle, mid, bot, support);\n"
+    "(B) the MATCH-HISTORY scoreboard: each player has a small round champion portrait "
+    "and NO champion name in text. The viewer (see is_viewer) is listed FIRST on their "
+    "own team, out of role order;\n"
     "(C) a plain roster — a spreadsheet/table or typed list with two team columns or "
     "sections and roles labeled top/jung(le)/mid/bot(adc)/supp(ort).\n\n"
     "TEAMS. On a game screen (A or B) the upper team (header 'TEAM 1', blue) is team1 "
@@ -235,12 +267,17 @@ _VISION_PROMPT = (
     "- name: the player's SUMMONER/account name (the primary player label), NOT the "
     "champion. Copy it exactly, including capitalization, spaces, and underscores.\n"
     "- champion: the champion that player is on. If the champion name is written, use "
-    "it; otherwise identify the champion from the portrait icon. null if the image "
+    "it; otherwise give your best identification from the portrait. null if the image "
     "shows no champions (e.g. a roster).\n"
     "- kills, deaths, assists: the three K / D / A numbers for that player, in order. "
     "null if the image shows no KDA.\n"
-    "- is_viewer: true only for the single highlighted row on a match-history "
-    "scoreboard; false for every other row and on screens with no highlighted row.\n\n"
+    "- is_viewer: on screens A and B one row may be highlighted (gold name and/or gold "
+    "border). That is the VIEWER, the player whose client took the screenshot. true "
+    "for that single row; false for every other row and when no row is highlighted.\n\n"
+    "KDA RATIO LINE. On some screens a smaller line of text is printed directly under "
+    "each player's K / D / A numbers, such as '4.0 KDA' or '21.0 KDA'. Set "
+    "kda_ratio_line to that text exactly as printed for the FIRST player of team1, or "
+    "to an empty string if nothing is printed under their K / D / A.\n\n"
     "TEAM TOTALS. Each team's header shows that team's total kills / deaths / assists "
     "and its gold. Set team1_kills / team2_kills to the KILLS number from each header; "
     "null if it is not shown.\n\n"
@@ -321,6 +358,9 @@ _BOARD_SCHEMA = {
     "properties": {
         "team1": {"type": "array", "items": _player_schema()},
         "team2": {"type": "array", "items": _player_schema()},
+        # Plain string ("" when absent), not nullable: the API caps a schema at 16
+        # union-typed parameters and this one is already at the limit.
+        "kda_ratio_line": {"type": "string"},
         "team1_name": {"type": ["string", "null"]},
         "team2_name": {"type": ["string", "null"]},
         "team1_kills": {"type": ["integer", "null"]},
@@ -329,7 +369,7 @@ _BOARD_SCHEMA = {
         "team1_won": {"type": ["boolean", "null"]},
         "team2_won": {"type": ["boolean", "null"]},
     },
-    "required": ["team1", "team2", "team1_name", "team2_name", "team1_kills",
+    "required": ["team1", "team2", "kda_ratio_line", "team1_name", "team2_name", "team1_kills",
                  "team2_kills", "banner", "team1_won", "team2_won"],
     "additionalProperties": False,
 }
@@ -342,8 +382,8 @@ def _int(v) -> Optional[int]:
         return None
 
 
-def _row(p: dict) -> ScoreRow:
-    champ = (p.get("champion") or "").strip() or None
+def _row(p: dict, keep_champion: bool = True) -> ScoreRow:
+    champ = ((p.get("champion") or "").strip() or None) if keep_champion else None
     name = (p.get("name") or "").strip()
     return ScoreRow(
         raw=name, name_guess=name, champion=champ,
@@ -411,6 +451,15 @@ def parse_scoreboard_image(image_bytes: bytes) -> ParsedScoreboard:
 def board_to_scoreboard(board: dict, raw_text: str = "") -> ParsedScoreboard:
     """Turn the vision model's JSON (shape: _BOARD_SCHEMA) into a ParsedScoreboard,
     cross-checking the winner. Pure — no network — so it is unit-testable."""
+    # Champion names are printed only on the post-game lobby screen. On the
+    # match-history screen there are just 30-pixel portraits, and a champion guessed
+    # from one would go straight into player stats — so those are dropped (the admin
+    # can still enter champions by hand). The model can't reliably say which screen
+    # it is looking at, but it copies printed text accurately, and only the lobby
+    # screen prints an "x.x KDA" line under each K/D/A. Payloads without the field
+    # (older ones, tests) keep their champions.
+    ratio = board.get("kda_ratio_line")
+    keep_champion = ratio is None or "kda" in str(ratio).lower()
     rows1 = list(board.get("team1") or [])[:5]
     rows2 = list(board.get("team2") or [])[:5]
     banner = board.get("banner")
@@ -429,8 +478,8 @@ def board_to_scoreboard(board: dict, raw_text: str = "") -> ParsedScoreboard:
 
     sb = ParsedScoreboard(
         raw_text=raw_text,
-        team1=[_row(p) for p in rows1],
-        team2=[_row(p) for p in rows2],
+        team1=[_row(p, keep_champion) for p in rows1],
+        team2=[_row(p, keep_champion) for p in rows2],
         banner=banner,
         team1_label=(board.get("team1_name") or "").strip() or None,
         team2_label=(board.get("team2_name") or "").strip() or None,

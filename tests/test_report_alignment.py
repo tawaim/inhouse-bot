@@ -181,16 +181,30 @@ def test_decide_winner_uses_banner_relative_to_viewer():
     assert decide_winner(None, None, "DEFEAT", 2) == (1, None)
     # A banner with no known viewer says nothing.
     assert decide_winner(None, None, "VICTORY", None) == (None, None)
-    # Kills alone, and kills agreeing with the banner.
-    assert decide_winner(30, 12, None, None) == (1, None)
+    # Kills agreeing with the banner: no note needed.
     assert decide_winner(12, 30, "VICTORY", 2) == (2, None)
 
 
-def test_decide_winner_refuses_to_guess_on_conflict():
-    winner, problem = decide_winner(30, 12, "VICTORY", 2)   # kills say 1, banner says 2
-    assert winner is None and "set the winner yourself" in problem
-    winner, problem = decide_winner(30, 12, None, None, model_vote=2)
-    assert winner is None and problem
+def test_decide_winner_banner_beats_a_small_kill_deficit():
+    """Real case (Jul 30 game 1): the viewer's team won 21 kills to 28."""
+    winner, note = decide_winner(21, 28, "VICTORY", 1)
+    assert winner == 1 and "double-check" in note
+
+
+def test_decide_winner_refuses_when_kills_strongly_contradict_banner():
+    winner, note = decide_winner(30, 12, "VICTORY", 2)   # banner says 2, team 1 is +18
+    assert winner is None and "set the winner yourself" in note
+
+
+def test_decide_winner_from_kills_alone_is_flagged_or_refused():
+    winner, note = decide_winner(30, 12, None, None)
+    assert winner == 1 and "guess" in note
+    # Real case (Oct 29 game 3): no banner in the crop, 26 kills to 27.
+    winner, note = decide_winner(26, 27, None, 1)
+    assert winner is None and "close" in note
+    # The model's own read disagreeing with the kills: no hint.
+    winner, note = decide_winner(30, 12, None, None, model_vote=2)
+    assert winner is None and note
 
 
 def _player(name, viewer=False):
@@ -308,3 +322,19 @@ def test_vision_client_is_given_a_timeout(monkeypatch):
     sb = parse_scoreboard_image(PNG_BYTES)
     assert seen["timeout"] == 60.0
     assert sb.unreadable and "timed out" in sb.notes[0]
+
+
+def test_champions_kept_on_lobby_screen_dropped_on_match_history_screen():
+    """Champion names are printed on the lobby screen (which also prints an 'x.x KDA'
+    line); on the match-history screen they are only portraits, and a guessed
+    champion must not reach player stats."""
+    def board(ratio_line):
+        return {"kda_ratio_line": ratio_line,
+                "team1": [_player(f"a{i}") for i in range(5)],
+                "team2": [_player(f"b{i}") for i in range(5)], "team1_name": None,
+                "team2_name": None, "team1_kills": 20, "team2_kills": 9, "banner": None,
+                "team1_won": None, "team2_won": None}
+
+    assert all(r.champion == "Ahri" for r in board_to_scoreboard(board("4.0 KDA")).team1)
+    assert all(r.champion is None for r in board_to_scoreboard(board("")).team1)
+    assert all(r.kills == 1 for r in board_to_scoreboard(board("")).team2)
