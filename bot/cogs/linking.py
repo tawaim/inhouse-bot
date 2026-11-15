@@ -18,15 +18,58 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from bot.config import Config, ROLES
-from bot.db.models import MatchPerformance, Player, Rating
+from bot.db.models import GameStat, MatchPerformance, Player, Rating, Signup
 from bot.db.session import get_session
 from bot.services.elo import INHOUSE_ROLE, seed_from_past_season, seed_from_rank
 from bot.services.opgg_client import OpggClient
-from bot.services.riot_client import RiotAccount, RiotAuthError, RiotClient
+from bot.services.riot_client import RiotAccount, RiotAuthError, RiotClient, RiotUnavailable
 
 log = logging.getLogger(__name__)
+
+RIOT_DOWN_MSG = (
+    "⚠️ Riot's API is unavailable right now (timeout, outage or rate limit), so nothing "
+    "was changed. Try again in a few minutes."
+)
+
+
+async def _discard_pending_link(db, player: Player) -> str:
+    """Throw away a pending (unapproved) link request. The caller commits.
+
+    A brand-new player with nothing attached is deleted. A player who already
+    has ratings, match history or signups is NEVER deleted — deleting a Player
+    cascades to their Rating rows, which would erase an established player's
+    whole inhouse history just because a re-link was rejected. They go back to
+    the unlinked state instead (as after /unlink), keeping previous_riot_puuid
+    so a later re-link can still tell "same account" from "different account".
+
+    Returns "deleted" or "reset".
+    """
+    pid = player.discord_id
+    attached = False
+    for stmt in (
+        select(Rating.discord_id).where(Rating.discord_id == pid),
+        select(MatchPerformance.discord_id).where(MatchPerformance.discord_id == pid),
+        select(GameStat.discord_id).where(GameStat.discord_id == pid),
+        select(Signup.discord_id).where(Signup.discord_id == pid),
+    ):
+        if (await db.execute(stmt.limit(1))).first() is not None:
+            attached = True
+            break
+    if not attached:
+        await db.delete(player)
+        return "deleted"
+    player.riot_puuid = None
+    player.riot_game_name = None
+    player.riot_tag_line = None
+    player.solo_tier = None
+    player.solo_rank = None
+    player.solo_lp = None
+    player.last_synced_seed_elo = None
+    player.link_status = "approved"  # the unlinked state: approved, no PUUID
+    return "reset"
 
 
 class LinkApprovalView(discord.ui.View):
@@ -75,6 +118,55 @@ class LinkApprovalView(discord.ui.View):
                 return line.strip("*")
         return "(unknown)"
 
+    @staticmethod
+    def _extract_puuid_prefix_from_message(message: discord.Message) -> Optional[str]:
+        """Pull the (truncated) PUUID out of the embed footer ('... · PUUID: abc…')."""
+        if not message.embeds:
+            return None
+        footer = message.embeds[0].footer.text or ""
+        if "PUUID:" not in footer:
+            return None
+        prefix = footer.split("PUUID:")[1].split("·")[0].strip().rstrip("….").strip()
+        return prefix or None
+
+    @classmethod
+    def _request_is_current(cls, message: discord.Message, player: Player) -> bool:
+        """Is the request shown in this DM the one currently pending for the player?
+
+        The footer only identifies the Discord user, so after /unlink + /link an
+        old DM's buttons would otherwise act on the NEW request. Compare the
+        account the DM shows with the player's current pending PUUID.
+        """
+        if not player.riot_puuid:
+            return False
+        prefix = cls._extract_puuid_prefix_from_message(message)
+        if prefix:
+            return player.riot_puuid.startswith(prefix)
+        shown = cls._extract_riot_id_from_message(message)
+        if shown == "(unknown)":
+            return True  # nothing to compare against; fall back to the old behaviour
+        return shown.lower() == f"{player.riot_game_name}#{player.riot_tag_line}".lower()
+
+    @staticmethod
+    async def _mark_superseded(interaction: discord.Interaction) -> None:
+        """Tell the owner this DM is stale and take its buttons away."""
+        try:
+            embed = interaction.message.embeds[0] if interaction.message.embeds else discord.Embed()
+            embed.color = discord.Color.dark_grey()
+            embed.add_field(
+                name="Superseded",
+                value="This request was cancelled or replaced by a newer one.",
+                inline=False,
+            )
+            await interaction.message.edit(embed=embed, view=None)
+        except discord.HTTPException:
+            pass
+        await interaction.followup.send(
+            "This request has been superseded — the user cancelled it or has since asked to "
+            "link a different account. Nothing was changed; use their newest request instead.",
+            ephemeral=True,
+        )
+
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.green, emoji="✅", custom_id="link_approve")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._is_owner(interaction):
@@ -103,6 +195,10 @@ class LinkApprovalView(discord.ui.View):
             if not puuid:
                 await interaction.followup.send("Internal error: pending player has no PUUID.", ephemeral=True)
                 return
+            current = self._request_is_current(interaction.message, player)
+        if not current:
+            await self._mark_superseded(interaction)
+            return
 
         try:
             rank = await self.riot.get_solo_rank(puuid)
@@ -113,6 +209,12 @@ class LinkApprovalView(discord.ui.View):
                 ephemeral=True,
             )
             return
+        except RiotUnavailable:
+            await interaction.followup.send(
+                RIOT_DOWN_MSG + " The request is still pending — click Approve again later.",
+                ephemeral=True,
+            )
+            return
         # Unranked this split? Fall back to OP.GG's most recent past-season rank.
         past = None
         if rank is None:
@@ -120,7 +222,13 @@ class LinkApprovalView(discord.ui.View):
 
         async with get_session() as db:
             player = await db.get(Player, target_id)
-            if player is None:
+            # Re-check now that the (slow) Riot calls are done: a second click,
+            # a /unlink or a new /link may have landed in the meantime.
+            if player is None or player.link_status != "pending" or player.riot_puuid != puuid:
+                await interaction.followup.send(
+                    "This link is no longer pending (already approved/rejected/unlinked).",
+                    ephemeral=True,
+                )
                 return
             # Detect whether this is a re-link of a DIFFERENT account
             # (vs same account). If different, we'll reseed elo on existing
@@ -253,8 +361,14 @@ class RejectReasonModal(discord.ui.Modal, title="Reject Link Request"):
             if player is None or player.link_status != "pending":
                 await interaction.followup.send("Already resolved.", ephemeral=True)
                 return
-            await db.delete(player)
-            await db.commit()
+            current = LinkApprovalView._request_is_current(interaction.message, player)
+            if current:
+                # Never deletes a player who has ratings or history (see helper).
+                await _discard_pending_link(db, player)
+                await db.commit()
+        if not current:
+            await LinkApprovalView._mark_superseded(interaction)
+            return
 
         for child in self.view.children:
             child.disabled = True
@@ -319,6 +433,13 @@ class LinkingCog(commands.Cog):
             account = await self.riot.get_account_by_riot_id(game_name, tag_line)
         except RiotAuthError:
             return None, "Riot API rejected our key. Ping an admin."
+        except RiotUnavailable as e:
+            if e.status is not None and 400 <= e.status < 500:
+                return None, (
+                    f"Riot couldn't look up `{game_name}#{tag_line}` (HTTP {e.status}). "
+                    f"Check the spelling of the name and tag and try again."
+                )
+            return None, RIOT_DOWN_MSG
         if account is None:
             return None, f"Couldn't find Riot account `{game_name}#{tag_line}`."
         return account, None
@@ -375,7 +496,18 @@ class LinkingCog(commands.Cog):
             player.riot_puuid = account.puuid
             player.region = self.config.riot_region
             player.link_status = "pending"
-            await db.commit()
+            try:
+                await db.commit()
+            except IntegrityError:
+                # riot_puuid is UNIQUE: someone else claimed this account between
+                # the check above and this commit.
+                await db.rollback()
+                await interaction.followup.send(
+                    "That Riot account was just claimed by another Discord user's link request. "
+                    "If this is a mistake, ask an admin.",
+                    ephemeral=True,
+                )
+                return
 
         riot_id_display = f"{account.game_name}#{account.tag_line}"
 
@@ -405,8 +537,9 @@ class LinkingCog(commands.Cog):
             )
             async with get_session() as db:
                 player = await db.get(Player, interaction.user.id)
-                if player:
-                    await db.delete(player)
+                if player and player.link_status == "pending" and player.riot_puuid == account.puuid:
+                    # Never deletes a player who has ratings or history (see helper).
+                    await _discard_pending_link(db, player)
                     await db.commit()
             await interaction.followup.send(
                 "❌ Couldn't reach the bot owner to send your request. "
@@ -469,6 +602,9 @@ class LinkingCog(commands.Cog):
         except RiotAuthError:
             await interaction.followup.send("Riot API rejected our key.", ephemeral=True)
             return
+        except RiotUnavailable:
+            await interaction.followup.send(RIOT_DOWN_MSG, ephemeral=True)
+            return
         past = None
         if rank is None:
             past = await self.opgg.get_past_season_rank(
@@ -494,6 +630,18 @@ class LinkingCog(commands.Cog):
             player.primary_role = primary_role
             player.riot_last_synced = datetime.utcnow()
             player.link_status = "approved"
+            try:
+                # Write the player row now so a UNIQUE(riot_puuid) clash surfaces
+                # here rather than in an autoflush further down: another link may
+                # have claimed this account while we were talking to Riot.
+                await db.flush()
+            except IntegrityError:
+                await db.rollback()
+                await interaction.followup.send(
+                    "That Riot account was just linked by someone else — nothing was changed.",
+                    ephemeral=True,
+                )
+                return
 
             if rank:
                 seed_elo = seed_from_rank(player.solo_tier, player.solo_rank)
@@ -550,8 +698,11 @@ class LinkingCog(commands.Cog):
                 return
             was_pending = player.link_status == "pending"
             # Remember the unlinked PUUID so we can detect "re-linking same account"
-            # vs "switched accounts" on the next /link.
-            player.previous_riot_puuid = player.riot_puuid
+            # vs "switched accounts" on the next /link. Only an APPROVED account
+            # counts: cancelling a pending request must not replace the record of
+            # the account the player's seed actually came from.
+            if not was_pending:
+                player.previous_riot_puuid = player.riot_puuid
             player.riot_puuid = None
             player.riot_game_name = None
             player.riot_tag_line = None
@@ -612,8 +763,11 @@ class LinkingCog(commands.Cog):
             perfs = (await db.execute(
                 select(MatchPerformance).where(MatchPerformance.discord_id == target.id)
             )).scalars().all()
-        stats_by_role = _aggregate_stats(perfs)
-        overall = _aggregate_stats(perfs, all_roles=True)
+            gstats = (await db.execute(
+                select(GameStat).where(GameStat.discord_id == target.id)
+            )).scalars().all()
+        stats_by_role = _aggregate_stats(perfs, gstats=gstats)
+        overall = _aggregate_stats(perfs, all_roles=True, gstats=gstats)
 
         # Overall summary line (if any games played)
         if overall["games"] > 0:
@@ -648,7 +802,7 @@ class LinkingCog(commands.Cog):
             lines = []
             for role in ROLES:
                 r = ratings_by_role.get(role)
-                stats = stats_by_role.get(role, {"games": 0, "wins": 0, "losses": 0, "k": 0, "d": 0, "a": 0})
+                stats = stats_by_role.get(role, {"games": 0, "wins": 0, "losses": 0, "k": 0, "d": 0, "a": 0, "kda_n": 0})
                 if r:
                     mod_str = f"({r.inhouse_modifier:+d})" if r.inhouse_modifier != 0 else ""
                     elo_label = f"Elo **{r.elo}** {mod_str}".strip()
@@ -860,36 +1014,52 @@ class LinkingCog(commands.Cog):
 
 
 
-def _aggregate_stats(perfs: list, all_roles: bool = False) -> dict | dict[str, dict]:
+def _aggregate_stats(perfs: list, all_roles: bool = False, gstats: list | None = None) -> dict | dict[str, dict]:
     """Aggregate match performances into per-role stats dicts.
     If all_roles=True, returns a single dict aggregating across all roles.
     Otherwise returns dict[role, dict].
-    """
-    if all_roles:
-        bucket = {"games": 0, "wins": 0, "losses": 0, "k": 0, "d": 0, "a": 0}
-        for p in perfs:
-            bucket["games"] += 1
-            if p.won:
-                bucket["wins"] += 1
-            else:
-                bucket["losses"] += 1
-            bucket["k"] += p.kills or 0
-            bucket["d"] += p.deaths or 0
-            bucket["a"] += p.assists or 0
-        return bucket
 
-    by_role: dict[str, dict] = {}
+    games/wins/losses count SERIES (one MatchPerformance each). KDA totals come
+    from the per-game GameStat rows (`gstats`) for any match that has them —
+    per-game reports leave kills/deaths/assists NULL on the series row — and
+    from the series row otherwise. `kda_n` is how many rows actually carried a
+    KDA; averages divide by that, not by the number of series.
+    """
+    gstats = gstats or []
+    matches_with_games = {g.match_id for g in gstats}
+    buckets: dict = {}
+
+    def bucket(role) -> dict:
+        return buckets.setdefault(
+            None if all_roles else role,
+            {"games": 0, "wins": 0, "losses": 0, "k": 0, "d": 0, "a": 0, "kda_n": 0},
+        )
+
+    def add_kda(b: dict, row) -> None:
+        if None in (row.kills, row.deaths, row.assists):
+            return
+        b["k"] += row.kills
+        b["d"] += row.deaths
+        b["a"] += row.assists
+        b["kda_n"] += 1
+
     for p in perfs:
-        b = by_role.setdefault(p.role, {"games": 0, "wins": 0, "losses": 0, "k": 0, "d": 0, "a": 0})
+        b = bucket(p.role)
         b["games"] += 1
         if p.won:
             b["wins"] += 1
         else:
             b["losses"] += 1
-        b["k"] += p.kills or 0
-        b["d"] += p.deaths or 0
-        b["a"] += p.assists or 0
-    return by_role
+        if p.match_id not in matches_with_games:
+            add_kda(b, p)
+    for g in gstats:
+        if g.role is None and not all_roles:
+            continue
+        add_kda(bucket(g.role), g)
+
+    if all_roles:
+        return bucket(None)
+    return buckets
 
 
 def _format_stat_line(stats: dict) -> str:
@@ -900,10 +1070,11 @@ def _format_stat_line(stats: dict) -> str:
     wins, losses = stats["wins"], stats["losses"]
     wr = (wins / games * 100) if games else 0
     line = f"{games} series · {wins}W-{losses}L ({wr:.0f}%)"
-    if stats["k"] or stats["d"] or stats["a"]:
-        avg_k = stats["k"] / games
-        avg_d = stats["d"] / games
-        avg_a = stats["a"] / games
+    n = stats.get("kda_n", 0)
+    if n:
+        avg_k = stats["k"] / n
+        avg_d = stats["d"] / n
+        avg_a = stats["a"] / n
         kda = (avg_k + avg_a) / max(avg_d, 1.0)
         line += f" · {avg_k:.1f}/{avg_d:.1f}/{avg_a:.1f} ({kda:.1f} KDA)"
     return line

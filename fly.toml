@@ -13,7 +13,10 @@ primary_region = "atl"   # Atlanta — closest to user. Use `fly platform region
   destination = "/data"
 
 # Bot is outbound-only — no public HTTP, no services block.
-# Fly will keep the process running via the VM's machine state.
+# Restart the machine whenever the process exits, whatever the exit code
+# (Fly's default, "on-failure", leaves it stopped after a clean exit).
+[[restart]]
+  policy = "always"
 
 [[vm]]
   cpu_kind = "shared"

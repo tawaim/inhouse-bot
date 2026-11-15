@@ -86,6 +86,10 @@ class PastSeasonRank:
     division: str        # e.g. "III"
     season_id: int       # OP.GG internal season id of the placement
     seasons_elapsed: int  # whole ~120-day seasons between the placement and now
+    # False when OP.GG gave a rank but no parseable placement date. seasons_elapsed
+    # is then 0 by default and must NOT be read as "placed this season": a sync
+    # keeps the player's existing seed instead of re-seeding with zero decay.
+    date_known: bool = True
 
 
 def _seasons_since(created_at_iso: str) -> int:
@@ -117,10 +121,18 @@ def parse_past_season(text: str) -> Optional[PastSeasonRank]:
         r'RankInfo\("' + re.escape(tier) + r'",' + re.escape(str(div_int)) + r',"([^"]+)"\)'
     )
     dm = date_re.search(text)
-    seasons_elapsed = _seasons_since(dm.group(1)) if dm else 0
+    date_known = False
+    if dm:
+        try:
+            datetime.fromisoformat(dm.group(1))
+            date_known = True
+        except (ValueError, TypeError):
+            pass
+    seasons_elapsed = _seasons_since(dm.group(1)) if date_known else 0
 
     return PastSeasonRank(
-        tier=tier, division=division, season_id=season_id, seasons_elapsed=seasons_elapsed
+        tier=tier, division=division, season_id=season_id,
+        seasons_elapsed=seasons_elapsed, date_known=date_known,
     )
 
 

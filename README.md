@@ -7,7 +7,7 @@ A Discord bot for managing weekly 5v5 League of Legends inhouse leagues. Automat
 - **Recruitment posts** — An admin posts a recruitment for a Thursday with `/recruit-now`. Signups close automatically at 9:30 PM ET on the Monday, Tuesday or Wednesday before the game (your choice), unless posted open-ended. With fewer than 10 signups they stay open and teams are made as soon as there are 10.
 - **Button-based signup** — Players click 🎮 Playing, ❌ Not Playing, or 📺 Commentator. Clicking Playing opens a private (ephemeral) role picker where they toggle TOP / JUNGLE / MID / BOT / SUPPORT / FILL. Role choices stay private; only the public counts are visible.
 - **Top-3 balanced matchmaking** — On Monday at 9:30 PM ET, signups close. The matchmaker enumerates every legal team split with role assignments, scores each by skill balance and role-preference penalty, and DMs the bot owner the top 3 most-balanced options that differ by at least 2 player swaps. The owner picks one with a button click; the chosen teams get posted publicly.
-- **Chess-style Elo** — Each player has 6 ratings: one per role plus an "Inhouse" rating that updates every game. New players are seeded from solo queue rank (Iron 800 → Challenger 2500). K-factor 40 for the first 10 games, 20 thereafter. Beating someone higher-rated gains more; losing to someone lower-rated costs more.
+- **Chess-style Elo** — Each player has 6 ratings: one per role plus an "Inhouse" rating that updates every game. New players are seeded from solo queue rank (Iron 800 → Challenger 2500). K-factor 60 for the first 10 games, 50 thereafter. Beating someone higher-rated gains more; losing to someone lower-rated costs more.
 - **Riot account linking with admin approval** — Players run `/link Faker#KR1`. The bot validates the Riot ID, then DMs the bot owner with Approve/Reject buttons. Once approved, the player's solo queue rank is fetched and their Elo is seeded. Unranked players are seeded from their most recent past-season rank (sourced from OP.GG, since Riot's API has no rank history), decayed ~100 elo per season elapsed.
 - **Manual result reporting** — Custom games don't appear in Riot's match history, so admins report outcomes via `/report-manual` (winner-only) or `/report` (with screenshot OCR for KDA enrichment, admin-confirmed before commit).
 - **Manual team override** — `/manual-match` lets the admin paste in a custom roster and bypass the matchmaker entirely.
@@ -60,6 +60,7 @@ The bot creates `data/inhouse.db` on first run.
 | `DISCORD_GUILD_ID` | yes | Your Discord server ID (for fast slash command sync) |
 | `OWNER_DISCORD_ID` | yes | Your personal Discord user ID — receives link approval DMs and team-choice DMs |
 | `RIOT_API_KEY` | yes | Personal or production Riot API key (development keys expire every 24 hours and won't work) |
+| `ANTHROPIC_API_KEY` | no | Lets `/report` read scoreboard screenshots. Without it the lineup is entered by hand |
 | `RIOT_REGION` | no | Default `na1` |
 | `RIOT_REGIONAL_ROUTE` | no | Default `americas` (for match-v5 and account-v1) |
 | `ADMIN_ROLE_NAME` | no | Default `League Admin` |
@@ -82,7 +83,7 @@ A full reference lives in [`COMMANDS.md`](./COMMANDS.md). Quick summary:
 - `/manual-match` — opens a modal for pasting in a custom roster
 - `/report <match_id> <winner> <screenshot>` — report results with OCR
 - `/report-manual <match_id> <winner>` — report results without OCR
-- `/sync-ranks` — refresh Riot rank data for all linked players (re-seeds Elo for unplayed roles only)
+- `/sync-ranks` — refresh Riot rank data for all linked players. Rewrites `base_seed` on every rating row (all roles, played or not) and recomputes Elo as `base_seed + inhouse_modifier`; inhouse results are untouched. Players with a manual seed (`/set-seed`) are skipped.
 - `/admin-list-players [filter]` — list all linked players with their Elo and games played
 - `/link-user @member <riot_id>` — admin-link someone, no approval flow
 - `/set-channel <recruit|results> <channel>` — set the default channel `/recruit-now` posts to
@@ -93,7 +94,7 @@ A full reference lives in [`COMMANDS.md`](./COMMANDS.md). Quick summary:
 
 ## Deployment (Fly.io)
 
-The repo is set up for Fly.io with a Dockerfile (includes Tesseract for OCR) and `fly.toml` configured for Atlanta region with a persistent volume for SQLite.
+The repo is set up for Fly.io with a Dockerfile (plain Python — no Tesseract; screenshot reading goes through the Anthropic API) and `fly.toml` configured for Atlanta region with a persistent volume for SQLite.
 
 ```bash
 fly launch --no-deploy

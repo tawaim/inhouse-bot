@@ -1,7 +1,7 @@
 """Async wrapper for the Riot Games API.
 
 Endpoints used:
-  - account-v1: Riot ID -> PUUID  (regional route)
+  - account-v1: Riot ID -> PUUID, PUUID -> current Riot ID  (regional route)
   - league-v4: ranked entries by PUUID  (platform route)
   - match-v5: match list & detail by PUUID  (regional route)
 
@@ -78,28 +78,50 @@ class RiotClient:
         await self._client.aclose()
 
     async def _get(self, url: str, params: Optional[dict[str, Any]] = None) -> Optional[Any]:
-        """GET with rate-limit handling. Returns parsed JSON (dict or list), or None on 404."""
+        """GET with rate-limit handling. Returns parsed JSON (dict or list).
+
+        Returns None ONLY for a real 404 ("no such account / no data"). Anything
+        that means "we could not find out" — timeouts, connection errors, 5xx,
+        429s that outlast the retries, unexpected status codes — raises
+        RiotUnavailable, so callers never mistake an outage for "unranked".
+        401/403 raise RiotAuthError.
+        """
+        last_problem = "no attempts made"
         async with self._sem:
             for attempt in range(3):
-                resp = await self._client.get(url, params=params)
+                try:
+                    resp = await self._client.get(url, params=params)
+                except httpx.HTTPError as e:  # timeouts, connection/protocol errors
+                    last_problem = f"{type(e).__name__}: {e}"
+                    log.warning("Riot request failed (%s) on %s", last_problem, url)
+                    await asyncio.sleep(2 ** attempt)
+                    continue
                 if resp.status_code == 200:
                     return resp.json()
                 if resp.status_code == 404:
                     return None
                 if resp.status_code == 429:
-                    retry_after = int(resp.headers.get("Retry-After", "1"))
+                    try:
+                        retry_after = int(resp.headers.get("Retry-After", "1"))
+                    except ValueError:
+                        retry_after = 1
+                    last_problem = "HTTP 429 (rate limited)"
                     log.warning("Riot 429, sleeping %ss", retry_after)
                     await asyncio.sleep(retry_after)
                     continue
-                if resp.status_code in (500, 502, 503, 504):
+                if resp.status_code >= 500:
+                    last_problem = f"HTTP {resp.status_code}"
                     await asyncio.sleep(2 ** attempt)
                     continue
                 if resp.status_code in (401, 403):
                     log.error("Riot auth error %s on %s — key may be expired", resp.status_code, url)
                     raise RiotAuthError(f"Auth failed: {resp.status_code}")
-                resp.raise_for_status()
-            log.error("Riot API exhausted retries for %s", url)
-            return None
+                log.error("Riot API unexpected status %s on %s", resp.status_code, url)
+                raise RiotUnavailable(
+                    f"unexpected HTTP {resp.status_code}", status=resp.status_code
+                )
+            log.error("Riot API exhausted retries for %s (%s)", url, last_problem)
+            raise RiotUnavailable(f"retries exhausted ({last_problem})")
 
     # --- account-v1 (regional) ---
 
@@ -113,6 +135,21 @@ class RiotClient:
             return None
         return RiotAccount(
             puuid=data["puuid"],
+            game_name=data["gameName"],
+            tag_line=data["tagLine"],
+        )
+
+    async def get_account_by_puuid(self, puuid: str) -> Optional[RiotAccount]:
+        """Current Riot ID for a PUUID (PUUIDs survive renames; Riot IDs don't)."""
+        url = (
+            f"https://{self.regional_route}.api.riotgames.com"
+            f"/riot/account/v1/accounts/by-puuid/{puuid}"
+        )
+        data = await self._get(url)
+        if not data or not data.get("gameName") or not data.get("tagLine"):
+            return None
+        return RiotAccount(
+            puuid=data.get("puuid", puuid),
             game_name=data["gameName"],
             tag_line=data["tagLine"],
         )
@@ -205,3 +242,13 @@ class RiotClient:
 
 class RiotAuthError(Exception):
     """Raised when the Riot API rejects our key (401/403)."""
+
+
+class RiotUnavailable(Exception):
+    """Raised when Riot could not give us an answer: timeouts, connection errors,
+    5xx, rate-limit retries exhausted, or an unexpected status code. Distinct from
+    "not found" (None) so an outage is never treated as "this player is unranked"."""
+
+    def __init__(self, message: str = "Riot API unavailable", status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
