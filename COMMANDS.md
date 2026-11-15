@@ -99,6 +99,7 @@ Post a recruitment for a specific Thursday. This is the only way recruitments ge
 **Behavior:**
 - Posts to the `channel` you pass, else the configured `recruit` channel (`/set-channel recruit`), else the channel you ran the command in.
 - Adds the three RSVP buttons: 🎮 Playing, ❌ Not Playing, 📺 Commentator
+- 🎮 Playing opens a private role picker. If the player has signed up to play before, they are signed up immediately with the roles they chose last time and the picker is pre-filled, so ignoring the picker still counts them in; they can change the roles and click Done. A first-time player has no previous roles and must pick at least one (or Fill) and click Done to be signed up.
 - The recruitment embed footer shows `Session #N` — use that id with `/signups`, `/close-signups`, `/manual-match`, `/report-manual`, etc.
 
 ### `/close-signups [session_id]` (admin)

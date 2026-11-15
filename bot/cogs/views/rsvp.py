@@ -44,18 +44,47 @@ class RsvpView(discord.ui.View):
             )
             return
 
-        # Look up existing roles so we can pre-fill the picker
+        # Pre-fill the picker: this session's roles if they're already in, otherwise
+        # the roles from the last time they signed up to play. In that second case
+        # they are signed up with those roles straight away, so someone who clicks
+        # Playing and never answers the role picker is still in (with last time's
+        # roles) instead of silently not signed up.
+        defaulted = False
         async with get_session() as db:
             existing = await db.get(Signup, (session.id, interaction.user.id))
-            existing_roles = set(existing.role_list) if existing and existing.status == "playing" else set()
+            if existing and existing.status == "playing" and existing.roles:
+                roles = set(existing.role_list)
+            else:
+                roles = await _last_roles(db, interaction.user.id, exclude_session_id=session.id)
+                if roles:
+                    roles_csv = ",".join(sorted(roles))
+                    if existing is None:
+                        db.add(Signup(session_id=session.id, discord_id=interaction.user.id,
+                                      status="playing", roles=roles_csv))
+                    else:
+                        existing.status = "playing"
+                        existing.roles = roles_csv
+                        existing.signed_up_at = datetime.utcnow()
+                    try:
+                        await db.commit()
+                        defaulted = True
+                    except IntegrityError:
+                        await db.rollback()  # double-click raced itself; the first one saved it
+                        defaulted = True
 
-        view = RolePickerView(session_id=session.id, user_id=interaction.user.id, selected=existing_roles)
-        await interaction.response.send_message(
-            content="**Pick your role(s).** Toggle as many as you'd like, then click Done. "
-                    "Choose **Fill** if you'll play whatever the team needs.",
-            view=view,
-            ephemeral=True,
-        )
+        view = RolePickerView(session_id=session.id, user_id=interaction.user.id, selected=roles)
+        view.saved_roles = set(roles)  # what is on record right now (empty = not signed up yet)
+        if defaulted:
+            content = (f"✅ You're in as **{_nice_roles(roles)}** — your roles from last time. "
+                       "Nothing more to do. To change them, toggle below and click Done.")
+        elif roles:
+            content = (f"You're in as **{_nice_roles(roles)}**. To change, toggle below and click Done.")
+        else:
+            content = ("**Pick your role(s).** Toggle as many as you'd like, then click Done. "
+                       "Choose **Fill** if you'll play whatever the team needs.")
+        await interaction.response.send_message(content=content, view=view, ephemeral=True)
+        if defaulted:
+            await _refresh_public_counts(interaction.client, session.id)
 
     @discord.ui.button(label="Not Playing", style=discord.ButtonStyle.danger, emoji="❌", custom_id="rsvp_not_playing")
     async def not_playing(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -64,6 +93,25 @@ class RsvpView(discord.ui.View):
     @discord.ui.button(label="Commentator", style=discord.ButtonStyle.secondary, emoji="📺", custom_id="rsvp_commentator")
     async def commentator(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _set_simple_status(interaction, "commentator", "📺 Logged as commentator.")
+
+
+_ROLE_ORDER = ["TOP", "JUNGLE", "MID", "BOT", "SUPPORT", "FILL"]
+
+
+def _nice_roles(roles) -> str:
+    return ", ".join(r.title() for r in _ROLE_ORDER if r in roles)
+
+
+async def _last_roles(db, discord_id: int, exclude_session_id: int) -> set[str]:
+    """The roles this player chose the most recent time they signed up to play in
+    another session, or an empty set if they never have."""
+    last = (await db.execute(
+        select(Signup)
+        .where(Signup.discord_id == discord_id, Signup.session_id != exclude_session_id,
+               Signup.status == "playing", Signup.roles.is_not(None), Signup.roles != "")
+        .order_by(Signup.signed_up_at.desc())
+    )).scalars().first()
+    return set(last.role_list) if last else set()
 
 
 async def _set_simple_status(interaction: discord.Interaction, status: str, confirm: str) -> None:
@@ -131,6 +179,7 @@ class RolePickerView(discord.ui.View):
         self.session_id = session_id
         self.user_id = user_id
         self.selected: set[str] = set(selected)
+        self.saved_roles: set[str] = set()  # roles already on record for this session
         self._build_buttons()
 
     def _build_buttons(self):
@@ -245,7 +294,9 @@ class CancelButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         for child in self.view.children:
             child.disabled = True
-        await interaction.response.edit_message(content="Cancelled.", view=self.view)
+        saved = getattr(self.view, "saved_roles", None)
+        content = (f"No change — you're in as **{_nice_roles(saved)}**." if saved else "Cancelled.")
+        await interaction.response.edit_message(content=content, view=self.view)
 
 
 # =============================================================================

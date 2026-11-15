@@ -366,3 +366,61 @@ async def test_manual_match_default_ignores_stale_sessions(world):
     # With the session current, the modal opens for it.
     ok = await world.run(world.admin_cog.manual_match)
     assert ok.modal is not None
+
+
+# ------------------------------------------------------------------ default roles
+
+@flow
+async def test_playing_defaults_to_last_weeks_roles_without_answering_the_picker(world):
+    """Clicking Playing and ignoring the role picker used to leave you not signed up."""
+    from bot.cogs.recruitment import RsvpView
+
+    player = (await world.add_players(1))[0]
+    last_week = await world.recruit(THURSDAY)
+    await world.signup(last_week.id, player, roles=("MID", "SUPPORT"))
+
+    this_week = await world.recruit(NEXT_THURSDAY)
+    ix = world.ix(player, message=await world.recruit_message(this_week.id))
+    await RsvpView().playing.callback(ix)          # ...and never touches the picker
+
+    su = {s.discord_id: s for s in await world.signups(this_week.id)}
+    assert su[player.id].status == "playing" and su[player.id].roles == "MID,SUPPORT"
+    assert "Mid, Support" in ix.text and "from last time" in ix.text
+    assert ix.replies[-1].view.selected == {"MID", "SUPPORT"}     # picker is pre-filled
+    assert "Playing — **1**" in (await world.recruit_message(this_week.id)).text
+
+    # They can still change the defaults and hit Done.
+    await world.signup(this_week.id, player, roles=("TOP",))
+    su = {s.discord_id: s for s in await world.signups(this_week.id)}
+    assert su[player.id].roles == "MID,SUPPORT,TOP"
+
+
+@flow
+async def test_playing_with_no_history_still_requires_a_role_choice(world):
+    from bot.cogs.recruitment import RsvpView
+
+    player = (await world.add_players(1))[0]
+    session = await world.recruit(THURSDAY)
+    ix = world.ix(player, message=await world.recruit_message(session.id))
+    await RsvpView().playing.callback(ix)
+    assert "Pick your role(s)" in ix.text
+    assert await world.signups(session.id) == []
+
+
+@flow
+async def test_defaults_use_the_most_recent_playing_signup_and_survive_not_playing(world):
+    from bot.cogs.recruitment import RsvpView
+
+    player = (await world.add_players(1))[0]
+    older = await world.recruit(THURSDAY)
+    await world.signup(older.id, player, roles=("BOT",))
+    newer = await world.recruit(NEXT_THURSDAY)
+    await world.signup(newer.id, player, roles=("JUNGLE",))   # BOT carried over, JUNGLE added
+    third = await world.recruit(date(2030, 5, 30))
+
+    # Said "not playing" first this week, then changed their mind: still gets defaults.
+    await world.rsvp(third.id, player, "not_playing")
+    ix = world.ix(player, message=await world.recruit_message(third.id))
+    await RsvpView().playing.callback(ix)
+    su = {s.discord_id: s for s in await world.signups(third.id)}
+    assert su[player.id].status == "playing" and su[player.id].roles == "BOT,JUNGLE"
