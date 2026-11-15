@@ -167,5 +167,10 @@ async def test_leaderboard_default_ranks_by_series_wins_ahead_of_game_record(wor
     line = (await world.run(world.stats.leaderboard)).text.splitlines()
     assert any("**2-1** series" in ln for ln in line)        # series record leads the row
 
+    # The footer describes the ranking actually used.
+    assert "Ranked by series won" in (await world.run(world.stats.leaderboard)).text
+    assert "Ranked by net game wins" in (await world.run(world.stats.leaderboard, sort="net")).text
+    assert "Ranked by INHOUSE elo" in (await world.run(world.stats.leaderboard, sort="elo")).text
+
     by_net = _order((await world.run(world.stats.leaderboard, sort="net")).text)
     assert set(by_net[:5]) == {f"P{i}" for i in c}           # net +1 beats net 0

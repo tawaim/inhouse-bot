@@ -177,10 +177,10 @@ class StatsCog(commands.Cog):
             description=desc or "No games played yet.",
             color=discord.Color.gold(),
         )
-        embed.set_footer(
-            text="Ranked by INHOUSE elo · tiebreaker: net wins" if sort == "elo"
-            else "Ranked by net wins (W−L) · tiebreaker: series won"
-        )
+        embed.set_footer(text={
+            "elo": "Ranked by INHOUSE elo · tiebreakers: net game wins, series won",
+            "net": "Ranked by net game wins (W−L) · tiebreakers: series won, elo",
+        }.get(sort, "Ranked by series won · tiebreakers: fewest series lost, net game wins, elo"))
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(
