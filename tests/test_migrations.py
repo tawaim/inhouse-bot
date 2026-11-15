@@ -69,3 +69,35 @@ def test_migration_noop_on_fresh_db(tmp_path):
         await close_db()
 
     asyncio.run(body())
+
+
+def test_game_stats_gains_per_game_delta_columns_with_old_rows_null(tmp_path):
+    """A game_stats table from before per-game deltas gets the two columns on boot,
+    and its existing rows read back as NULL (which is what routes them to the
+    MatchPerformance-based unreport)."""
+    db = tmp_path / "old_stats.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE game_stats (match_id INTEGER NOT NULL, game_no INTEGER NOT NULL, "
+        "discord_id BIGINT NOT NULL, role VARCHAR(8), champion VARCHAR(32), kills INTEGER, "
+        "deaths INTEGER, assists INTEGER, won BOOLEAN NOT NULL, "
+        "PRIMARY KEY (match_id, game_no, discord_id))"
+    )
+    conn.execute("INSERT INTO game_stats (match_id, game_no, discord_id, role, won) "
+                 "VALUES (1, 1, 42, 'MID', 1)")
+    conn.commit()
+    conn.close()
+
+    async def body():
+        await init_db(_config(str(db)))
+        await close_db()
+
+    asyncio.run(body())
+
+    conn = sqlite3.connect(str(db))
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(game_stats)")}
+    row = conn.execute(
+        "select discord_id, role, role_elo_delta, inhouse_elo_delta from game_stats").fetchone()
+    conn.close()
+    assert {"role_elo_delta", "inhouse_elo_delta"} <= cols
+    assert row == (42, "MID", None, None)

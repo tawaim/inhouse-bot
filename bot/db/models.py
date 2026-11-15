@@ -199,6 +199,12 @@ class GameStat(Base):
     deaths: Mapped[Optional[int]] = mapped_column(Integer)
     assists: Mapped[Optional[int]] = mapped_column(Integer)
     won: Mapped[bool] = mapped_column(Boolean)
+    # Elo this ONE game applied to the player's `role` rating and INHOUSE rating.
+    # /unreport reverses a series row by row from these, so a player who changed
+    # role between games is restored exactly. NULL on rows written before the
+    # columns existed — those matches are reversed from MatchPerformance instead.
+    role_elo_delta: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    inhouse_elo_delta: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
 
 class ProposalSet(Base):

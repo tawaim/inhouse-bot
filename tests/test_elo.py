@@ -188,7 +188,8 @@ def test_parse_series_score_valid():
     assert parse_series_score("2-1") == (2, 1)
     assert parse_series_score("1-2") == (1, 2)
     assert parse_series_score("0-2") == (0, 2)
-    assert parse_series_score("3-2") == (3, 2)  # bo5
+    assert parse_series_score("1-0") == (1, 0)  # single game
+    assert parse_series_score("0-1") == (0, 1)
     assert parse_series_score("2:1") == (2, 1)  # alternate sep
     assert parse_series_score(" 2-1 ") == (2, 1)  # whitespace
 
@@ -201,6 +202,9 @@ def test_parse_series_score_invalid():
     assert parse_series_score("2-2") == (-1, -1)  # ties not allowed
     assert parse_series_score("-1-0") == (-1, -1)
     assert parse_series_score("99-0") == (-1, -1)  # too long
+    # Not results a best-of-3 can end on.
+    for bad in ("1-1", "0-0", "3-0", "0-3", "3-2", "5-0", "2-3"):
+        assert parse_series_score(bad) == (-1, -1), bad
 
 
 def test_series_2_0_gains_more_than_2_1():

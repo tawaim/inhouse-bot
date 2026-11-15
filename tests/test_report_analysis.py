@@ -37,6 +37,16 @@ def _resolve(name):
     return NAME_TO_ID.get(name.strip().lower())
 
 
+def _board():
+    """SAMPLE as a clean read. The text parser keeps trailing OCR junk after each
+    name ("Alpha Reeune"); a vision read returns the bare name, and name resolution
+    deliberately no longer matches on a single leading word."""
+    sb = parse_scoreboard_text(SAMPLE)
+    for row in sb.team1 + sb.team2:
+        row.name_guess = row.name_guess.split()[0]
+    return sb
+
+
 def test_parse_finds_both_teams_and_banner():
     sb = parse_scoreboard_text(SAMPLE)
     assert sb.banner == "DEFEAT"
@@ -60,27 +70,29 @@ def test_parse_missing_teams_notes():
 
 
 def test_proposal_assigns_roles_and_resolves():
-    sb = parse_scoreboard_text(SAMPLE)
+    sb = _board()
     prop = build_game_proposal(sb, _resolve, FIXED_T1, FIXED_T2)
     assert len(prop.slots) == 10
     assert not prop.unresolved()  # all names resolve cleanly
     by = {(s.team, s.role): s.discord_id for s in prop.slots}
     assert by[(1, "TOP")] == 1 and by[(1, "SUPPORT")] == 5
     assert by[(2, "TOP")] == 6 and by[(2, "SUPPORT")] == 10
-    # Banner DEFEAT + screenshot-team1 == match-team1 -> match team 2 won.
+    # Screenshot team 2 has more kills (26 vs 19) and screenshot-team1 == match-team1
+    # -> match team 2 won. (The DEFEAT banner alone says nothing: it is relative to
+    # whoever took the screenshot.)
     assert prop.winner_hint == 2
 
 
 def test_proposal_aligns_swapped_screenshot_teams():
     """If the screenshot lists the match's team2 first, alignment must swap so
     roles/ids land on the correct match team."""
-    sb = parse_scoreboard_text(SAMPLE)
+    sb = _board()
     # Swap the fixed rosters so Alpha..Echo are actually match team 2.
     prop = build_game_proposal(sb, _resolve, FIXED_T2, FIXED_T1)
     by = {(s.team, s.role): s.discord_id for s in prop.slots}
     assert by[(1, "TOP")] == 6   # match team1 is Foxtrot's group now
     assert by[(2, "TOP")] == 1
-    assert prop.winner_hint == 1  # DEFEAT, screenshot-team1 is match-team2
+    assert prop.winner_hint == 1  # screenshot team 2 won, and it is match team 1
 
 
 def test_proposal_roster_first_keeps_roster_when_ocr_fails():
@@ -97,7 +109,7 @@ def test_proposal_roster_first_keeps_roster_when_ocr_fails():
 def test_proposal_detects_sub():
     """A row that resolves to a DIFFERENT known player than the rostered one is
     flagged as a sub and credited to that player."""
-    sb = parse_scoreboard_text(SAMPLE)
+    sb = _board()
 
     def res(name):
         n = name.strip().lower()
@@ -117,14 +129,14 @@ def test_proposal_detects_sub():
 # --- ReportState: the working state the confirm View drives -------------------
 
 def _state(banner_resolver=_resolve):
-    sb = parse_scoreboard_text(SAMPLE)
+    sb = _board()
     prop = build_game_proposal(sb, banner_resolver, FIXED_T1, FIXED_T2)
     return ReportState.from_proposals(match_id=99, games=[prop])
 
 
 def test_state_winner_defaults_to_hint_and_toggles():
     st = _state()
-    assert st.winners == [2]   # SAMPLE banner DEFEAT -> match team 2 won
+    assert st.winners == [2]   # SAMPLE: team 2 out-killed team 1 -> match team 2 won
     st.toggle_winner(0)
     assert st.winners == [1]
     st.set_winner(0, 2)
@@ -135,7 +147,7 @@ def test_state_ready_roster_first_and_carries_sub():
     """Roster-first: a state built from proposals is immediately committable (every
     slot defaults to a rostered player), and a detected sub is credited over the
     rostered default."""
-    sb = parse_scoreboard_text(SAMPLE)
+    sb = _board()
 
     def res(name):
         return 11 if name.strip().lower() == "bravo" else NAME_TO_ID.get(name.strip().lower())
