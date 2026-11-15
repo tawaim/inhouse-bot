@@ -31,17 +31,35 @@ bot/
 ├── db/
 │   ├── models.py        # SQLAlchemy ORM (players, ratings, sessions, signups, matches, etc.)
 │   └── session.py       # async session factory
-├── services/
+├── services/            # no Discord UI in here; services never import from cogs
 │   ├── riot_client.py   # async wrapper for account-v1, league-v4, match-v5
+│   ├── opgg_client.py   # past-season ranks from OP.GG (for seeding unranked players)
 │   ├── elo.py           # chess Elo math (expected score, update, K-factor, rank seeding)
 │   ├── matchmaking.py   # top-N team optimizer with diversity enforcement
 │   ├── ocr.py           # Tesseract-based screenshot parser
-│   └── scheduler.py     # APScheduler jobs (Monday close)
+│   ├── champions.py     # champion name resolution (aliases, fuzzy match)
+│   ├── champion_vision.py  # champion-icon recognition by perceptual hash
+│   ├── report_analysis.py  # scoreboard read -> proposed per-game lineups (ReportState, GameResult)
+│   ├── rosters.py       # team names; parse/print the TEAM 1 / ROLE: @user roster block
+│   ├── names.py         # name/alias resolution: informal or scoreboard name -> linked player
+│   ├── results.py       # rating writes: commit a series game by game, revert it, rescore it
+│   ├── ratings_lock.py  # the one lock every rating write runs under
+│   ├── seeding.py       # rank-seed sync: fetch Riot/OP.GG rank, apply base_seed, report
+│   ├── sessions.py      # signup close time, "current session" lookup, who gets matched
+│   └── scheduler.py     # APScheduler jobs (signup close poll, weekly rank sync)
 └── cogs/
     ├── linking.py       # /link, /link-user, /unlink, /profile, /admin-list-players + approval DMs
-    ├── recruitment.py   # button views (RSVP, role picker, proposal choice), session lifecycle
-    ├── admin.py         # /set-channel, /report, /report-manual, /sync-ranks, /manual-match, /test-* helpers
-    └── stats.py         # /leaderboard
+    ├── recruitment.py   # /recruit-now, /signups, /match-preview, /close-signups, ... + posting a
+    │                    #   recruitment and close-and-match (used by the scheduler)
+    ├── admin.py         # every other admin command: /set-channel, aliases, /match-channels, /report,
+    │                    #   /report-manual, /unreport, /sync-ranks, /set-seed, /manual-match, /test-*
+    ├── stats.py         # /leaderboard, /elo-history, /player-stats, /recent-games
+    └── views/           # discord.ui views and modals, one file per flow
+        ├── rsvp.py          # recruitment message: RSVP buttons, role picker, signup embed
+        ├── proposals.py     # owner's A/B/C team-option DM and committing the pick
+        ├── manual_match.py  # roster modals: /manual-match, /pickup-series, /resolve-names
+        ├── report.py        # /report confirm view (winners, subs, champions/KDA, commit)
+        └── match_channels.py  # /match-channels screenshot confirm
 ```
 
 ## Setup
