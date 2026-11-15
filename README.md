@@ -36,7 +36,7 @@ bot/
 │   ├── opgg_client.py   # past-season ranks from OP.GG (for seeding unranked players)
 │   ├── elo.py           # chess Elo math (expected score, update, K-factor, rank seeding)
 │   ├── matchmaking.py   # top-N team optimizer with diversity enforcement
-│   ├── ocr.py           # Tesseract-based screenshot parser
+│   ├── ocr.py           # Screenshot reader (Claude vision) + winner rules
 │   ├── champions.py     # champion name resolution (aliases, fuzzy match)
 │   ├── champion_vision.py  # champion-icon recognition by perceptual hash
 │   ├── report_analysis.py  # scoreboard read -> proposed per-game lineups (ReportState, GameResult)
@@ -127,7 +127,7 @@ fly deploy
 
 - **Custom games are invisible to Riot's API.** Riot's match-v5 endpoint doesn't expose custom-game results, so inhouse outcomes have to be reported manually via `/report` or `/report-manual`. Riot's API is used only for solo queue rank seeding and inferring primary role from recent ranked games.
 - **Past-season ranks come from OP.GG, not Riot.** Riot's API has no rank history (LEAGUE-V4 is current-split only; MATCH-V5 carries no tier field), so currently-unranked players are seeded from their most recent past-season Solo/Duo rank via OP.GG's hosted MCP server (`lol_get_summoner_profile`). The response is a token-compressed text format that `bot/services/opgg_client.py` parses with regexes; it's an unofficial endpoint, so the lookup fails soft (falls back to the 1200 default) if OP.GG changes it.
-- **OCR is best-effort.** Tesseract on League scoreboards has high variance — different resolutions, overlays, and font rendering all affect accuracy. The screenshot parser always presents results to the admin for confirmation before committing; KDAs that don't extract cleanly are simply left blank rather than guessed.
+- **Screenshot reading is best-effort.** Screenshots are read by a vision model and always shown to the admin for confirmation before anything is committed. A game with no clear winner is left blank for the admin to set, and champions are recorded only from the lobby screen that prints their names.
 - **Designed for small leagues.** The architecture (single SQLite file, single bot process) suits 10-30 active players comfortably. Scaling beyond that would require Postgres, sharded hosting, etc.
 - **Per-role and Inhouse Elo update independently.** Each match updates one role rating (the role you played) and your Inhouse rating. The other 4 role ratings sit untouched until you play those roles.
 

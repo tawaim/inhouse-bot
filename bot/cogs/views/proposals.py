@@ -106,12 +106,12 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
             predicted_balance=chosen["balance_diff"],
         )
         db.add(match)
+        await db.flush()  # assigns match.id without committing
         ps.chosen_index = choice_index
         ps.resolved_at = datetime.utcnow()
-        await db.commit()
-        await db.refresh(match)
         ps.resolved_match_id = match.id
-        await db.commit()
+        await db.commit()  # the match and its link from the option set land together
+        await db.refresh(match)
 
         session = await db.get(InhouseSession, ps.session_id)
 
