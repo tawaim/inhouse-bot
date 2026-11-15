@@ -6,8 +6,20 @@ on:
     branches:
       - main
 jobs:
+  test:
+    name: Regression checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: python tools/check.py
   deploy:
     name: Deploy app
+    needs: test   # a failing check blocks the deploy
     runs-on: ubuntu-latest
     concurrency: deploy-group    # optional: ensure only one action runs at a time
     steps:

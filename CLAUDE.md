@@ -44,3 +44,11 @@ cur.execute('''
     WHERE p.riot_game_name = ? AND r.role = ?
 ''', ('Zack Fox', 'MID'))
 ```
+
+## Testing
+
+Run `./check.ps1` (or `python tools/check.py`) before every push; pushing to `main` deploys to production. It compiles everything, builds all slash commands, and runs the test suite, including end-to-end flow tests on a fake Discord (`tests/harness.py`), a golden Elo season, and checks against `data/prod_inhouse.db` when that snapshot exists. A pre-push hook in `.githooks/` runs the same check.
+
+- Every bug fix gets a flow test that fails without the fix.
+- If Elo output changes on purpose, run `./check.ps1 --update-golden` and review the diff in `tests/golden/`.
+- Pull a fresh prod snapshot before changing anything that touches the schema, migrations or rating writes.

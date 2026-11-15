@@ -114,9 +114,44 @@ fly deploy
 
 ## Tests
 
-```bash
-pip install pytest
-python -m pytest tests/
+One command runs every local regression check. Nothing in it talks to Discord, Riot, Anthropic or Fly.
+
+```powershell
+pip install -r requirements.txt -r requirements-dev.txt   # once
+./check.ps1                 # or: python tools/check.py
+./check.ps1 --fast          # skip the production-snapshot tests
+./check.ps1 -k recruit      # only tests matching a keyword
 ```
 
-36 tests covering chess Elo math (expected score, K-factor transitions, upset gains), matchmaking (balance, role assignment, diversity enforcement, edge cases), and the manual-match parser (mention extraction, role aliases, validation errors).
+It does three things:
+
+1. **Compiles** every module.
+2. **Builds every slash command** exactly as Discord would receive it, so a bad command signature fails here instead of at startup.
+3. **Runs the test suite** in `tests/`:
+   - Unit tests for Elo, matchmaking, parsing and name resolution.
+   - **End-to-end flow tests** (`tests/test_flow_*.py`). `tests/harness.py` provides a fake Discord (guild, members, channels, DMs, button clicks) wired to the real cogs and a throwaway SQLite database, so a test can post a recruitment, click RSVP buttons, close signups, pick teams from the owner DM, report a series and undo it.
+   - **Golden Elo season** (`tests/test_golden_elo.py`). A fixed synthetic season is replayed and every rating is compared with `tests/golden/elo_season.json`. If you change the Elo maths on purpose, run `./check.ps1 --update-golden` and review `git diff tests/golden`.
+   - **Production snapshot** (`tests/test_prod_snapshot.py`). When `data/prod_inhouse.db` exists (see `CLAUDE.md` for how to pull it), the tests copy it to a temp folder and check that the current code boots on the real data without losing anything, that ratings are consistent, and that un-reporting and re-reporting the latest series is lossless. Skipped when there is no snapshot.
+
+The same check runs in two more places:
+
+- **Before every push** via `.githooks/pre-push`. Enable it once per clone with `git config core.hooksPath .githooks`. Pushing to `main` deploys, so a failing check blocks the push (`git push --no-verify` skips it).
+- **In GitHub Actions**, as a job the deploy depends on.
+
+### Writing a flow test
+
+```python
+from datetime import date
+from tests.harness import flow
+
+@flow
+async def test_under_ten_signups_stays_open(world):
+    players = await world.add_players(9)
+    session = await world.recruit(date(2030, 5, 16))
+    for p in players:
+        await world.signup(session.id, p)
+    await world.close(session.id)
+    assert (await world.session(session.id)).status == "recruiting"
+```
+
+When you fix a bug, add a flow test that fails without the fix.
