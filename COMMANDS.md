@@ -93,7 +93,8 @@ Post a recruitment for a specific Thursday. This is the only way recruitments ge
 **Arguments:**
 - `game_date` — The Thursday in YYYY-MM-DD format (must be a Thursday)
 - `channel` *(optional)* — where to post
-- `open_ended` *(optional, default false)* — if true, signups stay open **indefinitely** until you run `/close-signups`; the Monday auto-close skips it. Use this while you're gathering elo data and closing/drafting by hand.
+- `open_ended` *(optional, default false)* — if true, signups stay open **indefinitely** until you run `/close-signups`; the auto-close skips it. Use this while you're gathering elo data and closing/drafting by hand.
+- `close_day` *(optional, default Monday)* — `Monday`, `Tuesday` or `Wednesday`: the evening of game week (9:30 PM ET) when signups auto-close and the top-3 options are DM'd. Ignored when `open_ended` is true.
 
 **Behavior:**
 - Posts to the `channel` you pass, else the configured `recruit` channel (`/set-channel recruit`), else the channel you ran the command in.

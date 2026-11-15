@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import Literal, Optional
 
 import discord
 import pytz
@@ -55,6 +55,16 @@ log = logging.getLogger(__name__)
 # he only plays when there are exactly 10 signups and there's no one else to
 # bench. Matched on the Riot account (game name + tagline) so it tracks the
 # person regardless of Discord handle changes.
+# Which evening (9:30 PM ET) of game week signups auto-close: days before Thursday.
+CLOSE_DAY_OFFSETS = {"Monday": 3, "Tuesday": 2, "Wednesday": 1}
+
+
+def signups_close_local(game_date: date, close_day: str, tz) -> datetime:
+    """The tz-aware 9:30 PM close time on `close_day` of the game's week."""
+    day = game_date - timedelta(days=CLOSE_DAY_OFFSETS[close_day])
+    return tz.localize(datetime.combine(day, datetime.min.time()).replace(hour=21, minute=30))
+
+
 ALLORIM_GAME_NAME = "allorim"
 ALLORIM_TAG_LINE = "na1"
 
@@ -556,17 +566,16 @@ class RecruitmentCog(commands.Cog):
         game_date: date,
         channel: Optional[discord.TextChannel] = None,
         open_ended: bool = False,
+        close_day: str = "Monday",
     ) -> InhouseSession:
         """Post the recruitment for a Thursday. If channel is None, uses the
         configured recruit channel. If open_ended, signups have no scheduled
-        close (signups_close_at=NULL) and only close via /close-signups."""
+        close (signups_close_at=NULL) and only close via /close-signups.
+        Otherwise they auto-close at 9:30 PM ET on `close_day` of game week."""
         if open_ended:
-            signups_close_local = None
+            close_local = None
         else:
-            monday_before = game_date - timedelta(days=3)
-            signups_close_local = self.tz.localize(
-                datetime.combine(monday_before, datetime.min.time()).replace(hour=21, minute=30)
-            )
+            close_local = signups_close_local(game_date, close_day, self.tz)
 
         if channel is None:
             channel = await self._get_recruit_channel()
@@ -580,8 +589,8 @@ class RecruitmentCog(commands.Cog):
                 recruit_posted_at=datetime.utcnow(),
                 # None for open-ended signups (no scheduled close).
                 signups_close_at=(
-                    signups_close_local.astimezone(pytz.UTC).replace(tzinfo=None)
-                    if signups_close_local is not None else None
+                    close_local.astimezone(pytz.UTC).replace(tzinfo=None)
+                    if close_local is not None else None
                 ),
                 recruit_channel_id=channel.id,
                 status="recruiting",
@@ -589,7 +598,7 @@ class RecruitmentCog(commands.Cog):
             db.add(session)
             await db.flush()  # assigns session.id before we build the embed/send
             embed = _build_public_embed(
-                game_date, signups_close_local, buckets={}, session_id=session.id
+                game_date, close_local, buckets={}, session_id=session.id
             )
             msg = await channel.send(embed=embed, view=view)
             session.recruit_msg_id = msg.id
@@ -778,7 +787,8 @@ class RecruitmentCog(commands.Cog):
     @app_commands.describe(
         game_date="Game date in YYYY-MM-DD format (must be a Thursday)",
         channel="Where to post (defaults to the configured recruit channel, then this channel).",
-        open_ended="If true, signups stay open until you run /close-signups (no Monday auto-close).",
+        open_ended="If true, signups stay open until you run /close-signups (no auto-close).",
+        close_day="Evening (9:30 PM ET) of game week when signups auto-close. Default Monday.",
     )
     async def recruit_now(
         self,
@@ -786,6 +796,7 @@ class RecruitmentCog(commands.Cog):
         game_date: str,
         channel: Optional[discord.TextChannel] = None,
         open_ended: bool = False,
+        close_day: Literal["Monday", "Tuesday", "Wednesday"] = "Monday",
     ):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("League Admin only.", ephemeral=True)
@@ -822,7 +833,9 @@ class RecruitmentCog(commands.Cog):
             )
             return
         try:
-            session = await self.post_recruitment(d, channel=target, open_ended=open_ended)
+            session = await self.post_recruitment(
+                d, channel=target, open_ended=open_ended, close_day=close_day
+            )
         except Exception as e:
             await interaction.followup.send(f"Failed: {e}", ephemeral=True)
             return
@@ -830,7 +843,7 @@ class RecruitmentCog(commands.Cog):
         where = posted_in.mention if isinstance(posted_in, discord.TextChannel) else "the recruit channel"
         close_note = (
             " Signups stay open until you run `/close-signups`."
-            if open_ended else " Signups auto-close Monday 9:30 PM ET."
+            if open_ended else f" Signups auto-close {close_day} 9:30 PM ET."
         )
         await interaction.followup.send(
             f"Posted recruitment for {d} in {where} (Session #{session.id}).{close_note}",

@@ -1,6 +1,11 @@
 """Scheduler: cron jobs for recruitment lifecycle.
 
-  Monday  21:30 ET  ->  close THIS Thursday's session, run matchmaker, post teams
+  Mon/Tue/Wed  21:30 ET  ->  if THIS Thursday's session has reached its signup
+                             close time: close it, run matchmaker, post teams
+
+Each recruitment stores its own close time (Monday by default; /recruit-now's
+close_day can pick Tuesday or Wednesday), so the job runs all three evenings and
+only acts once that time has arrived.
 
 Recruitments are posted manually via /recruit-now — there is no auto-post.
 """
@@ -21,6 +26,15 @@ from bot.db.session import get_session
 
 log = logging.getLogger(__name__)
 
+# Tolerance for a run that fires a hair before the stored close time.
+_DUE_SLACK = timedelta(minutes=5)
+
+
+def signups_due(signups_close_at: datetime | None, now_utc: datetime) -> bool:
+    """True once a session's scheduled close (naive UTC) has arrived. Open-ended
+    sessions (no close time) are never due; they close only via /close-signups."""
+    return signups_close_at is not None and signups_close_at <= now_utc + _DUE_SLACK
+
 
 def setup_scheduler(bot: discord.Client, config: Config) -> AsyncIOScheduler:
     tz = pytz.timezone(config.timezone)
@@ -32,7 +46,7 @@ def setup_scheduler(bot: discord.Client, config: Config) -> AsyncIOScheduler:
         if not isinstance(cog, RecruitmentCog):
             log.error("RecruitmentCog not loaded; skipping close job")
             return
-        # Find the session whose Thursday is THIS week (3 days from Monday)
+        # Find the session whose Thursday is THIS week
         today = datetime.now(tz).date()
         this_thursday = today + timedelta(days=(3 - today.weekday()) % 7)
         async with get_session() as db:
@@ -40,10 +54,13 @@ def setup_scheduler(bot: discord.Client, config: Config) -> AsyncIOScheduler:
                 InhouseSession.game_date == this_thursday,
                 InhouseSession.status == "recruiting",
                 # Open-ended sessions (no scheduled close) are closed only via
-                # /close-signups, so the Monday auto-close skips them.
+                # /close-signups, so the auto-close skips them.
                 InhouseSession.signups_close_at.is_not(None),
             )
             session = (await db.execute(stmt)).scalar_one_or_none()
+        if session is not None and not signups_due(session.signups_close_at, datetime.utcnow()):
+            log.info("Session %d closes at %s UTC; not due yet", session.id, session.signups_close_at)
+            return
         if session is None:
             log.info("No auto-closing recruiting session for %s; nothing to close", this_thursday)
             return
@@ -55,10 +72,10 @@ def setup_scheduler(bot: discord.Client, config: Config) -> AsyncIOScheduler:
 
     # misfire_grace_time lets a run that's slightly late (busy loop, brief downtime)
     # still fire instead of being dropped; coalesce collapses pile-ups into one run.
-    # Monday 9:30 PM
+    # Mon/Tue/Wed 9:30 PM (job id kept for continuity)
     scheduler.add_job(
         monday_close_job,
-        CronTrigger(day_of_week="mon", hour=21, minute=30),
+        CronTrigger(day_of_week="mon,tue,wed", hour=21, minute=30),
         id="monday_close",
         replace_existing=True,
         misfire_grace_time=3 * 3600,
