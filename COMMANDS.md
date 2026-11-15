@@ -299,36 +299,46 @@ Builds an editable roster from the **current signups** before any teams exist. T
 
 ### `/sync-ranks` (admin)
 
-Refreshes Riot API rank data for every linked-and-approved player. Useful to call before a game night so seeding reflects current ranks.
+Refreshes every linked player's base seed from their current solo queue rank. The same refresh also runs automatically every Monday at 6 PM ET and just before teams are generated.
 
-Pending players are skipped (we don't want to waste API calls on links that might be rejected).
+- Updates `base_seed` on every role for each player; inhouse gains and losses are kept, so displayed Elo is the new seed plus the existing inhouse modifier.
+- Currently unranked players are seeded from their most recent past-season rank, minus 100 Elo per season elapsed (capped at 400).
+- The reply lists each change with the reason (rank change, past-season decay, became unranked), who was skipped because of a manual seed (`/set-seed`), and who could not be checked.
+- If Riot is unavailable for a player, their seed is left alone and they are listed as an error. A rejected API key stops the sync with nothing changed.
 
-### `/report <match_id> <winner> <screenshot>` (admin)
+### `/report <match_id> <game1> [game2] [game3]` (admin)
 
-Report the outcome of a match using an end-of-game screenshot.
+Report a series from end-of-game screenshots, one per game (PNG/JPEG/GIF/WebP, up to 5 MB each).
 
 **Arguments:**
 - `match_id` — The match number from the teams post (shown in the embed footer)
-- `winner` — `team1` or `team2`
-- `screenshot` — End-of-game scoreboard image
+- `game1`, `game2`, `game3` — one scoreboard screenshot per game played
 
 **Flow:**
-1. Bot OCRs the screenshot to extract per-player KDAs
-2. Shows you a confirmation embed with detected stats and OCR confidence
-3. You react ✅ to commit or ❌ to cancel
-4. On commit: TrueSkill ratings update for all 10 players based on the result; per-player KDA rows are saved
+1. Each screenshot is read by a vision model: player names, K/D/A, the team kill totals, the VICTORY/DEFEAT banner and which player took the screenshot.
+2. You get a confirmation view showing each game's lineup, the suggested winner and any notes. Nothing is saved yet.
+3. Check every game has the right winner (a game with no clear winner is left blank and must be set), fix anything that was misread, then **Commit**.
+4. On commit, Elo is applied game by game to whoever actually played, and per-game stats are saved. The reply says what happened; if someone else already reported the match, it says so instead of claiming success.
 
-OCR is best-effort — confidence varies with screenshot resolution and overlay state. The admin always confirms before committing.
+**How the read is interpreted:**
+- **Roles come from the match roster, not from the row order in the screenshot.** A rostered player keeps their rostered role wherever they appear. Only someone on neither roster is treated as a substitute, in the slot of the rostered player who is missing from that game.
+- **Winner:** the banner is the game's own verdict, applied to the team of whoever took the screenshot. Kill totals are a cross-check. If the two strongly disagree, or there is no banner and the kills are close, no winner is suggested and a note tells you to set it.
+- **Team orientation:** if too few names can be matched to tell which screenshot team is which match team, the game is flagged and a **Swap teams** button lets you flip it.
+- **Champions** are recorded only from the post-game lobby screen, which prints champion names. The match-history screen shows only portraits, so those games have no champion unless you add them with the champions button.
+- **Substitutes** must be linked players. Picking someone corrects that slot; a new name is remembered as an alias only when the name was unrecognised, and an existing alias is never overwritten.
+- If a screenshot can't be read at all (bad file, vision service down), the view says so. You can still enter the lineup by hand or use `/report-manual`.
+
+The confirmation view expires after about 13 minutes of inactivity; nothing is saved when it does, so run `/report` again.
 
 ### `/report-manual <series_score> [match_id | session_id | game_date]` (admin)
 
-Same as `/report` but skips OCR/screenshot. Use when you don't have a screenshot or OCR is failing.
+Same as `/report` but with no screenshots. Use it when you only know the score.
 
 **Arguments:**
-- `series_score` — from team1's perspective: `2-0`, `2-1`, `1-2`, or `0-2`
+- `series_score` — from team1's perspective: `2-0`, `2-1`, `1-2` or `0-2` for a best-of-3, or `1-0` / `0-1` for a single game. Anything else is rejected.
 - Exactly **one** of: `match_id` (the match number), `session_id` (reports that session's latest unreported match), or `game_date` (`YYYY-MM-DD`, must be a Thursday)
 
-Updates ratings the same way as `/report`. Per-player performance rows are still created but with KDA fields blank.
+Updates ratings the same way as `/report`. No KDAs or champions are recorded.
 
 ### `/unreport <match_id>` (admin)
 
