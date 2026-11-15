@@ -1,14 +1,17 @@
-"""Admin commands: result reporting, channel config, rank syncing."""
+"""Admin slash commands: channel config, aliases, match channels, result
+reporting, rank seeding, manual matches and the test helpers.
+
+The commands are thin: roster parsing lives in bot.services.rosters, name
+resolution in bot.services.names, rating writes in bot.services.results, rank
+seeding in bot.services.seeding, and the modals/views in bot.cogs.views.
+"""
 from __future__ import annotations
 
 import asyncio
-import difflib
 import json
 import logging
-import re
 from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from typing import Literal, Optional
 
 import discord
@@ -18,72 +21,51 @@ from discord.ext import commands
 from sqlalchemy import delete, func, select, update
 
 from bot.cogs.recruitment import RecruitmentCog
-from bot.cogs.views.manual_match import (  # noqa: F401  (re-exported for callers of bot.cogs.admin)
-    PICKUP_DUPLICATE_WINDOW,
+from bot.cogs.views.manual_match import (
     EditRosterView,
     ManualMatchModal,
     PickupSeriesModal,
     ResolveNamesModal,
-    _recent_duplicate_pickup,
 )
 from bot.cogs.views.match_channels import _ScreenshotChannelsConfirmView
-from bot.cogs.views.report import (  # noqa: F401  (re-exported for callers of bot.cogs.admin)
+from bot.cogs.views.report import (
     ALL_UNREADABLE_MSG,
     ReportConfirmView,
-    _ChampionModal,
     _commit_status_message,
-    _GameSelect,
     _report_embed,
+)
+from bot.config import Config, ROLES, format_team_lines
+from bot.db.models import Alias, GameStat, GuildConfig, Match, MatchPerformance, Player, ProposalSet, Rating, Session as InhouseSession, Signup
+from bot.db.session import get_session
+from bot.services import results, seeding
+from bot.services.elo import DEFAULT_ELO, INHOUSE_ROLE, parse_series_score, seed_from_rank
+from bot.services.names import _norm_name, build_resolver, learn_alias
+from bot.services.ocr import MAX_IMAGE_BYTES, ParsedScoreboard, parse_scoreboard_image
+from bot.services.opgg_client import OpggClient
+from bot.services.report_analysis import GameResult, ReportState, _resolve_name, build_game_proposal
+from bot.services.riot_client import RiotAuthError, RiotClient
+from bot.services.rosters import TEAM_NAMES, _team_no_for_label, format_roster_block, team_channel_name
+from bot.services.sessions import find_current_session
+
+# Names that used to be defined in this module and are still imported from here
+# (by the tests, and by anything else written against the old layout).
+from bot.cogs.views.manual_match import PICKUP_DUPLICATE_WINDOW, _recent_duplicate_pickup  # noqa: F401
+from bot.cogs.views.report import (  # noqa: F401
+    _ChampionModal,
+    _GameSelect,
     _report_notes,
     _SlotPlayerSelect,
     _SlotSelect,
     _WinnerButton,
 )
-from bot.config import Config, ROLES, format_team_lines
-from bot.db.models import Alias, GameStat, GuildConfig, Match, MatchPerformance, Player, ProposalSet, Rating, Session as InhouseSession, Signup
-from bot.db.session import get_session
-from bot.services.champions import resolve_champion
-from bot.services.report_analysis import (
-    GameResult,
-    ReportState,
-    _resolve_name,
-    build_game_proposal,
-)
-from bot.services.ocr import MAX_IMAGE_BYTES, ParsedScoreboard, parse_scoreboard_image
-from bot.services.names import (  # noqa: F401  (re-exported for callers of bot.cogs.admin)
+from bot.services.names import (  # noqa: F401
     NameMatch,
     _build_candidate_index,
-    _norm_name,
     _resolve_single_name,
-    build_resolver,
-    learn_alias,
     match_player_names,
     resolve_name_block,
 )
-from bot.services import results, seeding
-from bot.services.ratings_lock import ratings_lock
-from bot.services.sessions import find_current_session
-from bot.services.rosters import (  # noqa: F401  (re-exported for callers of bot.cogs.admin)
-    TEAM_NAMES,
-    ManualMatchParseError,
-    _MENTION_RE,
-    _ROLE_LINE_RE,
-    _team_no_for_label,
-    format_roster_block,
-    parse_manual_match,
-    team_channel_name,
-)
-from bot.services.elo import (
-    DEFAULT_ELO,
-    INHOUSE_ROLE,
-    average_elo,
-    parse_series_score,
-    seed_from_past_season,
-    seed_from_rank,
-    update_elo_team_game,
-)
-from bot.services.opgg_client import OpggClient
-from bot.services.riot_client import RiotAuthError, RiotClient
+from bot.services.rosters import ManualMatchParseError, parse_manual_match  # noqa: F401
 
 log = logging.getLogger(__name__)
 

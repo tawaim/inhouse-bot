@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Literal, Optional
 
 import discord
@@ -34,46 +34,30 @@ import pytz
 from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 
-from bot.config import Config, ROLE_EMOJIS, ROLES, format_team_lines
-from bot.db.models import GuildConfig, Match, MatchPerformance, Player, ProposalSet, Rating, Session as InhouseSession, Signup
-from bot.cogs.views.proposals import (  # noqa: F401  (re-exported for callers of bot.cogs.recruitment)
-    ProposalChoiceView,
-    _handle_proposal_pick,
-    _team_lines,
-)
-from bot.cogs.views.rsvp import (  # noqa: F401  (re-exported for callers of bot.cogs.recruitment)
+from bot.cogs.views.proposals import ProposalChoiceView, _team_lines
+from bot.cogs.views.rsvp import RsvpView, _build_public_embed, _refresh_public_counts
+from bot.config import Config, ROLES
+from bot.db.models import GuildConfig, Match, Player, ProposalSet, Rating, Session as InhouseSession, Signup
+from bot.db.session import get_session
+from bot.services.matchmaking import PlayerInput, make_all_matches, make_match, make_top_matches
+from bot.services.rosters import TEAM_NAMES, format_roster_block
+from bot.services.sessions import _select_playing, find_current_session, signups_close_local
+
+# Names that used to be defined in this module and are still imported from here
+# (by the tests, and by anything else written against the old layout).
+from bot.cogs.views.proposals import _handle_proposal_pick  # noqa: F401
+from bot.cogs.views.rsvp import (  # noqa: F401
     CancelButton,
     DoneButton,
     RolePickerView,
     RoleToggleButton,
-    RsvpView,
-    _build_public_embed,
     _format_user_list,
     _is_linked_approved,
-    _refresh_public_counts,
     _resolve_session_from_message,
     _set_simple_status,
 )
-from bot.db.session import get_session
-from bot.services.matchmaking import (
-    MatchProposal,
-    PlayerInput,
-    TeamAssignment,
-    make_all_matches,
-    make_match,
-    make_top_matches,
-)
-from bot.services.rosters import TEAM_NAMES, format_roster_block
-from bot.services.sessions import (  # noqa: F401  (re-exported for callers of bot.cogs.recruitment)
-    CLOSE_DAY_OFFSETS,
-    CURRENT_GRACE_DAYS,
-    _is_allorim,
-    _select_playing,
-    find_current_session,
-    signups_close_local,
-)
+from bot.services.sessions import CLOSE_DAY_OFFSETS, CURRENT_GRACE_DAYS, _is_allorim  # noqa: F401
 
 log = logging.getLogger(__name__)
 
