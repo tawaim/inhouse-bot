@@ -421,12 +421,14 @@ async def test_rescore_is_atomic_when_the_recommit_fails(world):
     async def boom(self, db, *args, **kwargs):
         raise RuntimeError("boom")
 
-    real = AdminCog._commit_games_in
-    AdminCog._commit_games_in = boom
+    import bot.services.results as results_mod
+
+    real = results_mod.commit_games_in
+    results_mod.commit_games_in = boom
     try:
         ix = await world.run(world.admin_cog.rescore_match, match_id=match_id)
     finally:
-        AdminCog._commit_games_in = real
+        results_mod.commit_games_in = real
     assert "failed" in ix.text and "nothing was changed" in ix.text
     assert await world.ratings() == ratings
     assert [_stat_key(s) for s in await world.game_stats(match_id)] == stats
