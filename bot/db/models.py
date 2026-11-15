@@ -97,6 +97,12 @@ class Session(Base):
     recruit_msg_id: Mapped[Optional[int]] = mapped_column(BigInteger)
     recruit_channel_id: Mapped[Optional[int]] = mapped_column(BigInteger)
     status: Mapped[str] = mapped_column(String(16), default="recruiting")
+    # "recruiting" -> ("closed") -> "matched" -> "completed", or "cancelled".
+    #   recruiting: RSVP buttons live.  closed: locked by /close-signups, no teams yet.
+    #   matched: options generated (ProposalSet) and/or teams set (Match).
+    close_notice: Mapped[Optional[str]] = mapped_column(String(32))
+    # Why the last auto-close attempt couldn't make teams (e.g. "short:9",
+    # "coverage:10"). Lets the retry loop post that notice once, not every run.
 
     signups: Mapped[list["Signup"]] = relationship(back_populates="session", cascade="all, delete-orphan")
     matches: Mapped[list["Match"]] = relationship(back_populates="session", cascade="all, delete-orphan")

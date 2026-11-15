@@ -2419,38 +2419,48 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(
         name="test-trigger-close",
-        description="(admin) Manually trigger the Monday close-and-DM-options job for testing.",
+        description="(admin) Close signups now and DM the owner the 3 team options.",
     )
-    async def test_trigger_close(self, interaction: discord.Interaction):
+    @app_commands.describe(session_id="Session ID. Defaults to the current open session.")
+    async def test_trigger_close(self, interaction: discord.Interaction, session_id: Optional[int] = None):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("League Admin only.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
 
-        from bot.cogs.recruitment import RecruitmentCog
+        from bot.cogs.recruitment import RecruitmentCog, find_current_session
         cog = self.bot.get_cog("RecruitmentCog")
         if not isinstance(cog, RecruitmentCog):
             await interaction.followup.send("Recruitment cog not loaded.", ephemeral=True)
             return
 
         async with get_session() as db:
-            session = (await db.execute(
-                select(InhouseSession).where(InhouseSession.status == "recruiting")
-                .order_by(InhouseSession.game_date.asc())
-            )).scalars().first()
+            if session_id is not None:
+                session = await db.get(InhouseSession, session_id)
+            else:
+                session = await find_current_session(db, ("recruiting", "closed"), cog._today())
             if session is None:
-                await interaction.followup.send("No active recruiting session.", ephemeral=True)
+                await interaction.followup.send(
+                    "No open session to close. Pass `session_id:` to pick one.", ephemeral=True)
                 return
+            sid = session.id
 
         try:
-            await cog.close_signups_and_match(session.id)
-            await interaction.followup.send(
-                f"✅ Triggered close on session {session.id}. Check your DMs for the 3 options.",
-                ephemeral=True,
-            )
+            outcome = await cog.close_signups_and_match(sid)
         except Exception as e:
             log.exception("test-trigger-close failed")
             await interaction.followup.send(f"❌ Failed: {e}", ephemeral=True)
+            return
+        messages = {
+            "matched": f"✅ Session #{sid} closed. The owner was DM'd the 3 options.",
+            "dm_failed": f"⚠️ Session #{sid} closed and options were generated, but the owner DM "
+                         f"failed. Fix DMs, then `/resend-options session_id:{sid}`.",
+            "waiting": f"⏳ Session #{sid} can't be matched yet (not enough players, or roles "
+                       f"can't be covered). It was left as is — see the recruit channel.",
+            "not_open": f"Session #{sid} isn't open (already matched, completed or cancelled).",
+            "no_channel": f"❌ I can't reach Session #{sid}'s recruit channel right now. Nothing changed.",
+        }
+        await interaction.followup.send(messages.get(outcome, outcome), ephemeral=True)
 
     @app_commands.command(
         name="manual-match",
@@ -2506,15 +2516,18 @@ class AdminCog(commands.Cog):
                     )
                     return
             else:
-                # Fallback: soonest active session (recruiting, closed, or matched)
-                session = (await db.execute(
-                    select(InhouseSession)
-                    .where(InhouseSession.status.in_(["recruiting", "closed", "matched"]))
-                    .order_by(InhouseSession.game_date.asc())
-                )).scalars().first()
+                # Fallback: the current session (recruiting, closed, or matched) —
+                # never a stale one whose game date has passed. An old session
+                # left open used to capture new matches (one got attached to a
+                # session two months earlier).
+                import pytz
+                from bot.cogs.recruitment import find_current_session
+                today = datetime.now(pytz.timezone(self.config.timezone)).date()
+                session = await find_current_session(db, ("recruiting", "closed", "matched"), today)
                 if session is None:
                     await interaction.response.send_message(
-                        "No active session. Use `/recruit-now` first or specify `game_date:`.",
+                        "No current session. Use `/recruit-now` first, or pass `session_id:` / "
+                        "`game_date:` to target an older one.",
                         ephemeral=True,
                     )
                     return

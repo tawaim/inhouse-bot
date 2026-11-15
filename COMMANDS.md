@@ -108,6 +108,19 @@ Closes signups for **one specific** recruitment — locks the RSVP buttons (stat
 - Pass `session_id` to close that exact recruitment.
 - With no id: closes the open one if there's exactly one; if several are open, it **refuses and lists them** so you pick the right one (it never closes more than the one you mean).
 - Mainly for `open_ended` recruitments, but also works to close a scheduled one early.
+- To have the bot build teams from a closed session, run `/test-trigger-close session_id:<N>`.
+
+### `/reopen-signups <session_id>` (admin)
+
+Re-opens signups for a session that is `closed`, `cancelled`, or waiting on a team pick (`matched` with no teams chosen yet). Use it when someone drops out after the close, or a tenth player turns up late.
+
+- Any unanswered team options are voided (the old DM buttons will say so).
+- The session no longer auto-closes. Once the list is right, run `/test-trigger-close session_id:<N>` to generate new options.
+- Refused once teams exist for the session; edit the roster with `/manual-match` instead.
+
+### `/resend-options [session_id]` (admin)
+
+Re-sends the three team options to the owner's DMs for a session that is waiting on a pick. Use it when the original DM failed (DMs closed) or got lost. Defaults to the current session awaiting a pick.
 
 ### `/match-preview` (admin)
 
@@ -343,9 +356,9 @@ The fakes get realistic-looking ranks (Bronze through Diamond) and a mix of role
 
 **Important:** these are not real Discord users — their `discord_id` values are 1, 2, 3, ..., which won't collide with real IDs. They show up in `<@1>` mentions as "Unknown User" since Discord can't resolve them. That's fine for testing the matchmaker math; you just won't see nice names.
 
-### `/test-trigger-close`
+### `/test-trigger-close [session_id]`
 
-Manually fires the Monday 9:30 PM "close signups + send 3 options to owner" job on the active session. Lets you skip waiting for the cron when testing end-to-end.
+Closes signups now and DMs the owner the three options, without waiting for the scheduled close. Works on a `recruiting` or `closed` session; defaults to the current one. The reply says what actually happened: options sent, owner DM failed, or not enough players yet.
 
 ---
 
@@ -361,29 +374,35 @@ When someone runs `/link`, you get a DM with the request and two buttons:
 
 ### Match option choice (DM)
 
-When the Monday 9:30 PM scheduler fires (or `/test-trigger-close` is run), you get a DM with the top-3 proposals:
+When a recruitment reaches its signup close time (or `/test-trigger-close` is run), you get a DM with the top-3 proposals:
 - **Pick Option A** (green)
 - **Pick Option B** (blue)
 - **Pick Option C** (gray)
 
 Click one → bot creates the Match record and posts the chosen teams publicly to the recruit channel. The match is then ready for `/report` once games finish.
 
-If you don't pick, the proposal sits there forever — no auto-pick.
+If you don't pick, the proposal sits there — no auto-pick. `/resend-options` sends it again. The buttons refuse to act if the options were replaced, the session was cancelled, or teams were already set by hand.
 
 ---
 
 ## Scheduled jobs (no command)
 
-These run automatically based on cron triggers. (Recruitments themselves are posted manually via `/recruit-now` — there is no auto-post job.)
+These run automatically. (Recruitments themselves are posted manually via `/recruit-now` — there is no auto-post job.)
 
-### Monday 9:30 PM ET — Close signups, send proposals
+### Every 5 minutes — close due signups, send proposals
 
-For the session whose Thursday is 3 days away (this week's Thursday):
-1. Counts `playing` signups (ignores Not Playing and Commentator)
-2. If less than 10 — cancels the session with a "not enough" message
-3. If 10 or more — runs the matchmaker, generates top-3 diverse proposals, DMs them to you, posts a "teams being finalized" placeholder publicly
+Each recruitment stores its own close time (9:30 PM ET on the `close_day` you chose). On every pass, for each recruiting session whose close time has arrived:
+1. Counts `playing` signups (ignores Not Playing and Commentator).
+2. Fewer than 10, or the picked roles can't fill two teams: signups **stay open**, one notice is posted in the recruit channel, and the bot tries again on the next pass. Teams are made as soon as it becomes possible.
+3. 10 or more: refreshes ranks, runs the matchmaker, DMs you the top-3 options, and posts a "teams being finalized" notice.
+
+Because it polls, a close that was missed while the bot was restarting is picked up within minutes. Sessions still open more than a day after their game date are marked cancelled automatically.
 
 You then click an option in your DM to commit it.
+
+### Monday 6:00 PM ET — refresh ranks
+
+Refreshes every linked player's base seed from their current solo queue rank, whether or not a game is scheduled that week.
 
 ---
 

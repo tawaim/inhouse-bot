@@ -4,7 +4,7 @@ A Discord bot for managing weekly 5v5 League of Legends inhouse leagues. Automat
 
 ## What it does
 
-- **Recruitment posts** — An admin posts a recruitment for a Thursday with `/recruit-now`. Signups close automatically the Monday 9:30 PM before the game (unless posted open-ended).
+- **Recruitment posts** — An admin posts a recruitment for a Thursday with `/recruit-now`. Signups close automatically at 9:30 PM ET on the Monday, Tuesday or Wednesday before the game (your choice), unless posted open-ended. With fewer than 10 signups they stay open and teams are made as soon as there are 10.
 - **Button-based signup** — Players click 🎮 Playing, ❌ Not Playing, or 📺 Commentator. Clicking Playing opens a private (ephemeral) role picker where they toggle TOP / JUNGLE / MID / BOT / SUPPORT / FILL. Role choices stay private; only the public counts are visible.
 - **Top-3 balanced matchmaking** — On Monday at 9:30 PM ET, signups close. The matchmaker enumerates every legal team split with role assignments, scores each by skill balance and role-preference penalty, and DMs the bot owner the top 3 most-balanced options that differ by at least 2 player swaps. The owner picks one with a button click; the chosen teams get posted publicly.
 - **Chess-style Elo** — Each player has 6 ratings: one per role plus an "Inhouse" rating that updates every game. New players are seeded from solo queue rank (Iron 800 → Challenger 2500). K-factor 40 for the first 10 games, 20 thereafter. Beating someone higher-rated gains more; losing to someone lower-rated costs more.

@@ -34,6 +34,7 @@ import pytz
 from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from bot.config import Config, ROLE_EMOJIS, ROLES, format_team_lines
 from bot.db.models import GuildConfig, Match, MatchPerformance, Player, ProposalSet, Rating, Session as InhouseSession, Signup
@@ -63,6 +64,25 @@ def signups_close_local(game_date: date, close_day: str, tz) -> datetime:
     """The tz-aware 9:30 PM close time on `close_day` of the game's week."""
     day = game_date - timedelta(days=CLOSE_DAY_OFFSETS[close_day])
     return tz.localize(datetime.combine(day, datetime.min.time()).replace(hour=21, minute=30))
+
+
+# A session is "current" from when it is posted until the day after its game date.
+# Anything older is stale and is never picked as a default target for a command.
+CURRENT_GRACE_DAYS = 1
+
+
+async def find_current_session(db, statuses, today: date) -> Optional[InhouseSession]:
+    """The soonest session in `statuses` that hasn't gone stale, or None.
+
+    Commands that act on "the active session" use this instead of "the oldest
+    session with that status", which used to pick up months-old leftovers.
+    """
+    return (await db.execute(
+        select(InhouseSession)
+        .where(InhouseSession.status.in_(list(statuses)))
+        .where(InhouseSession.game_date >= today - timedelta(days=CURRENT_GRACE_DAYS))
+        .order_by(InhouseSession.game_date.asc())
+    )).scalars().first()
 
 
 ALLORIM_GAME_NAME = "allorim"
@@ -284,6 +304,15 @@ class DoneButton(discord.ui.Button):
             return
 
         async with get_session() as db:
+            # The picker can sit open for minutes; signups may have closed meanwhile.
+            session = await db.get(InhouseSession, view.session_id)
+            if session is None or session.status != "recruiting":
+                for child in view.children:
+                    child.disabled = True
+                await interaction.response.edit_message(
+                    content="🔒 Signups closed before you hit Done, so this wasn't saved.", view=view
+                )
+                return
             existing = await db.get(Signup, (view.session_id, view.user_id))
             roles_csv = ",".join(sorted(view.selected))
             if existing is None:
@@ -294,10 +323,15 @@ class DoneButton(discord.ui.Button):
                     roles=roles_csv,
                 ))
             else:
+                # Editing roles keeps your place in line; only (re)joining resets it.
+                if existing.status != "playing":
+                    existing.signed_up_at = datetime.utcnow()
                 existing.status = "playing"
                 existing.roles = roles_csv
-                existing.signed_up_at = datetime.utcnow()
-            await db.commit()
+            try:
+                await db.commit()
+            except IntegrityError:
+                await db.rollback()  # double-click raced itself; the first click saved it
 
         nice_roles = ", ".join(view.selected)
         warn = ""
@@ -368,6 +402,22 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
             await interaction.response.send_message(
                 f"This was already resolved (Option {chr(ord('A') + ps.chosen_index)}).",
                 ephemeral=True,
+            )
+            return
+        if ps.resolved_at is not None:
+            await interaction.response.send_message(
+                "These options were replaced by a newer set — use the latest DM.", ephemeral=True
+            )
+            return
+        owning = await db.get(InhouseSession, ps.session_id)
+        has_teams = (await db.execute(
+            select(Match).where(Match.session_id == ps.session_id, Match.winner.is_(None))
+        )).scalars().first() is not None
+        if owning is None or owning.status != "matched" or has_teams:
+            why = ("teams were already set for this session" if has_teams
+                   else f"the session is {owning.status if owning else 'gone'}")
+            await interaction.response.send_message(
+                f"These options are no longer valid — {why}.", ephemeral=True
             )
             return
 
@@ -557,6 +607,15 @@ def _build_public_embed(
     return embed
 
 
+class RecruitmentExists(Exception):
+    """Raised by post_recruitment when that game date already has a live session."""
+
+    def __init__(self, session_id: int, status: str):
+        super().__init__(f"Session #{session_id} already exists for that date ({status}).")
+        self.session_id = session_id
+        self.status = status
+
+
 # =============================================================================
 # Cog
 # =============================================================================
@@ -596,19 +655,33 @@ class RecruitmentCog(commands.Cog):
             raise RuntimeError("No recruit channel configured. Use /set-channel recruit first.")
 
         view = RsvpView()
+        close_utc = (
+            close_local.astimezone(pytz.UTC).replace(tzinfo=None)
+            if close_local is not None else None  # None for open-ended signups
+        )
         async with get_session() as db:
-            session = InhouseSession(
-                game_date=game_date,
-                recruit_posted_at=datetime.utcnow(),
-                # None for open-ended signups (no scheduled close).
-                signups_close_at=(
-                    close_local.astimezone(pytz.UTC).replace(tzinfo=None)
-                    if close_local is not None else None
-                ),
-                recruit_channel_id=channel.id,
-                status="recruiting",
-            )
-            db.add(session)
+            # game_date is unique, so a Thursday that was cancelled earlier is
+            # re-posted by reviving its row (old signups are dropped) rather than
+            # failing on the constraint.
+            session = (await db.execute(
+                select(InhouseSession).where(InhouseSession.game_date == game_date)
+            )).scalar_one_or_none()
+            if session is not None and session.status != "cancelled":
+                raise RecruitmentExists(session.id, session.status)
+            if session is None:
+                session = InhouseSession(game_date=game_date)
+                db.add(session)
+            else:
+                for su in (await db.execute(
+                    select(Signup).where(Signup.session_id == session.id)
+                )).scalars().all():
+                    await db.delete(su)
+            session.recruit_posted_at = datetime.utcnow()
+            session.signups_close_at = close_utc
+            session.recruit_channel_id = channel.id
+            session.recruit_msg_id = None
+            session.status = "recruiting"
+            session.close_notice = None
             await db.flush()  # assigns session.id before we build the embed/send
             embed = _build_public_embed(
                 game_date, close_local, buckets={}, session_id=session.id
@@ -619,47 +692,62 @@ class RecruitmentCog(commands.Cog):
             await db.refresh(session)
         return session
 
-    async def close_signups_and_match(self, session_id: int) -> None:
-        """Lock the session, refresh everyone's base_seed from current Riot rank,
-        then run matchmaker on Playing signups, post teams."""
-        # Refresh base_seed for all linked players BEFORE running matchmaker.
-        # This is the "weekly auto-refresh" — solo queue rank changes between
-        # Mondays now influence elo before matchmaking.
+    def _today(self) -> date:
+        return datetime.now(self.tz).date()
+
+    async def close_signups_and_match(self, session_id: int) -> str:
+        """Close a session's signups and generate the team options. Safe to call
+        repeatedly (the scheduler retries it). Returns what happened:
+
+          "matched"     options generated and DM'd to the owner
+          "dm_failed"   options generated but the owner DM failed (warning posted)
+          "waiting"     fewer than 10 signups, or roles can't be covered: the
+                        session is left as it was and a notice is posted (once
+                        per distinct reason)
+          "not_open"    session missing, or not recruiting/closed
+          "no_channel"  recruit channel unreachable right now; nothing changed
+        """
+        async with get_session() as db:
+            session = await db.get(InhouseSession, session_id)
+            if session is None or session.status not in ("recruiting", "closed"):
+                log.warning("Session %s is not open for matching", session_id)
+                return "not_open"
+            channel = self.bot.get_channel(session.recruit_channel_id)
+            if channel is None:
+                log.error("Recruit channel %s not reachable; will retry", session.recruit_channel_id)
+                return "no_channel"
+            n_playing = len((await db.execute(
+                select(Signup.discord_id)
+                .where(Signup.session_id == session_id, Signup.status == "playing")
+            )).all())
+            if n_playing < 10:
+                await self._hold_open(db, session, channel, f"short:{n_playing}", (
+                    f"⏳ Only **{n_playing}** signed up for **{session.game_date.strftime('%a %b %d')}** "
+                    f"(need 10). Signups stay open — I'll make teams as soon as there are 10."
+                ))
+                return "waiting"
+
+        # Enough players: refresh everyone's base seed from current Riot rank
+        # before balancing. Best-effort — stale ratings beat no teams.
         try:
             admin_cog = self.bot.get_cog("AdminCog")
             if admin_cog is not None and hasattr(admin_cog, "_refresh_all_base_seeds"):
                 result = await admin_cog._refresh_all_base_seeds()
                 log.info("Pre-matchmaking sync: %s", result)
-            else:
-                log.warning("AdminCog._refresh_all_base_seeds not available; skipping pre-matchmaking sync")
         except Exception:
             log.exception("Pre-matchmaking base_seed refresh failed; continuing with stale ratings")
 
         async with get_session() as db:
             session = await db.get(InhouseSession, session_id)
-            if session is None or session.status != "recruiting":
-                log.warning("Session %s not in recruiting state", session_id)
-                return
-
+            if session is None or session.status not in ("recruiting", "closed"):
+                return "not_open"  # changed while we were syncing ranks
             playing_signups = (await db.execute(
                 select(Signup)
                 .where(Signup.session_id == session_id)
                 .where(Signup.status == "playing")
             )).scalars().all()
-
-            channel = self.bot.get_channel(session.recruit_channel_id)
-            if channel is None:
-                log.error("Recruit channel %s no longer accessible", session.recruit_channel_id)
-                return
-
             if len(playing_signups) < 10:
-                session.status = "cancelled"
-                await db.commit()
-                await channel.send(
-                    f"❌ Inhouse for **{session.game_date.strftime('%a %b %d')}** cancelled — "
-                    f"only {len(playing_signups)} signups (need 10)."
-                )
-                return
+                return "waiting"  # someone dropped during the sync; next run posts the notice
 
             # Pick the 10 to matchmake (benches Allorim unless he's needed for 10).
             ids = [s.discord_id for s in playing_signups]
@@ -685,69 +773,97 @@ class RecruitmentCog(commands.Cog):
 
             proposals = make_top_matches(player_inputs, n=3, min_diff=2)
             if not proposals:
-                session.status = "cancelled"
-                await db.commit()
-                await channel.send(
-                    "❌ Couldn't generate balanced teams — role coverage is impossible "
-                    "with the current signups (e.g., nobody picked Support and no Fills). "
-                    "An admin will need to swap people manually."
-                )
-                return
+                await self._hold_open(db, session, channel, f"coverage:{len(playing_signups)}", (
+                    f"⚠️ {len(playing_signups)} signed up for "
+                    f"**{session.game_date.strftime('%a %b %d')}**, but the roles people picked "
+                    f"can't fill both teams (e.g. nobody on Support and no Fills). Signups stay "
+                    f"open — add roles or **Fill** and I'll try again."
+                ))
+                return "waiting"
 
-            # Save proposals for owner to choose from
+            # Any earlier unanswered option sets for this session are now stale.
+            for old in (await db.execute(
+                select(ProposalSet).where(
+                    ProposalSet.session_id == session.id, ProposalSet.resolved_at.is_(None))
+            )).scalars().all():
+                old.resolved_at = datetime.utcnow()
+
             proposal_set = ProposalSet(
                 session_id=session.id,
                 proposals_json=json.dumps([p.to_json_dict() for p in proposals]),
             )
             db.add(proposal_set)
             session.status = "matched"
+            session.close_notice = None
             await db.commit()
             await db.refresh(proposal_set)
 
-            # Public placeholder
+            chosen_ids = {s.discord_id for s in ordered}
+            bench = [s.discord_id for s in playing_signups if s.discord_id not in chosen_ids]
+            date_label = session.game_date.strftime('%a %b %d')
+
+        # The options are saved. Public notices are best-effort: a failed post must
+        # never stop the owner from getting the options.
+        try:
             await channel.send(
-                f"🔒 Signups closed for **{session.game_date.strftime('%a %b %d')}** "
-                f"(Session #{session.id}). Teams being finalized — check back shortly."
+                f"🔒 Signups closed for **{date_label}** "
+                f"(Session #{session_id}). Teams being finalized — check back shortly."
             )
-            if len(playing_signups) > 10:
-                bench = [s for s in playing_signups
-                         if not any(
-                             s.discord_id in p.team1.player_ids or
-                             s.discord_id in p.team2.player_ids
-                             for p in proposals
-                         )]
-                if bench:
-                    bench_mentions = " ".join(f"<@{s.discord_id}>" for s in bench)
-                    await channel.send(f"🪑 On the bench (signed up after first 10): {bench_mentions}")
+            if bench:
+                await channel.send("🪑 On the bench this week: " + " ".join(f"<@{i}>" for i in bench))
+        except discord.HTTPException:
+            log.exception("Could not post the signups-closed notice for session %s", session_id)
 
-        # DM the owner with the 3 options
-        await self._send_proposal_dm(proposal_set.id, session.id, proposals)
+        delivered = await self._send_proposal_dm(proposal_set.id)
+        return "matched" if delivered else "dm_failed"
 
-    async def _send_proposal_dm(
-        self, proposal_set_id: int, session_id: int, proposals: list,
-    ) -> None:
-        """DM the owner with the top-3 options + choice buttons."""
+    async def _hold_open(self, db, session: InhouseSession, channel, reason: str, text: str) -> None:
+        """Teams can't be made yet: leave the session as it is and post `text`,
+        but only when the reason changed since the last attempt (the scheduler
+        retries every few minutes)."""
+        if session.close_notice == reason:
+            return
+        session.close_notice = reason
+        await db.commit()
+        try:
+            await channel.send(text)
+        except discord.HTTPException:
+            log.exception("Could not post hold-open notice for session %s", session.id)
+
+    async def _send_proposal_dm(self, proposal_set_id: int) -> bool:
+        """DM the owner a ProposalSet's options + choice buttons. Works from the
+        saved JSON, so it can be re-sent at any time (/resend-options). Returns
+        True if delivered; on failure posts a warning in the recruit channel."""
+        async with get_session() as db:
+            ps = await db.get(ProposalSet, proposal_set_id)
+            if ps is None:
+                return False
+            session = await db.get(InhouseSession, ps.session_id)
+            proposals = json.loads(ps.proposals_json)
+        session_id = session.id
+
         try:
             owner = self.bot.get_user(self.config.owner_discord_id) or \
                     await self.bot.fetch_user(self.config.owner_discord_id)
         except (discord.NotFound, discord.HTTPException):
             log.error("Could not fetch owner user %s", self.config.owner_discord_id)
             await self._warn_owner_dm_failed(session_id)
-            return
+            return False
 
-        async with get_session() as db:
-            session = await db.get(InhouseSession, session_id)
-
+        colors = [discord.Color.green(), discord.Color.blue(), discord.Color.purple()]
         embeds = []
-        for i, proposal in enumerate(proposals):
+        for i, proposal in enumerate(proposals[:3]):
             label = chr(ord("A") + i)  # A, B, C
-            embed = discord.Embed(
-                title=f"Option {label}",
-                color=[discord.Color.green(), discord.Color.blue(), discord.Color.purple()][i],
-            )
-            embed.add_field(name=f"🔵 {TEAM_NAMES[1]}", value=_team_lines(proposal.team1.by_role), inline=True)
-            embed.add_field(name=f"🔴 {TEAM_NAMES[2]}", value=_team_lines(proposal.team2.by_role), inline=True)
-            embed.set_footer(text=_balance_footer(proposal))
+            embed = discord.Embed(title=f"Option {label}", color=colors[i])
+            team1 = {role: int(uid) for role, uid in proposal["team1"].items()}
+            team2 = {role: int(uid) for role, uid in proposal["team2"].items()}
+            embed.add_field(name=f"🔵 {TEAM_NAMES[1]}", value=_team_lines(team1), inline=True)
+            embed.add_field(name=f"🔴 {TEAM_NAMES[2]}", value=_team_lines(team2), inline=True)
+            lane = proposal.get("lane_diff")
+            embed.set_footer(text=(
+                f"Lane diff: {lane:.0f} · Team diff: {proposal['balance_diff']:.0f}"
+                if lane is not None else f"Skill diff: {proposal['balance_diff']:.2f}"
+            ))
             embeds.append(embed)
 
         intro = discord.Embed(
@@ -767,13 +883,14 @@ class RecruitmentCog(commands.Cog):
         except (discord.Forbidden, discord.HTTPException) as e:
             log.error("Could not DM owner: %s", e)
             await self._warn_owner_dm_failed(session_id)
-            return
+            return False
 
         async with get_session() as db:
             ps = await db.get(ProposalSet, proposal_set_id)
             if ps:
                 ps.dm_message_id = msg.id
                 await db.commit()
+        return True
 
     async def _warn_owner_dm_failed(self, session_id: int) -> None:
         """Fallback when the owner can't be DM'd the match options: post a notice
@@ -787,9 +904,9 @@ class RecruitmentCog(commands.Cog):
             return
         try:
             await channel.send(
-                "⚠️ Teams are ready, but I couldn't DM the bot owner the options to choose from. "
-                "An admin can finalize manually with `/manual-match`, or the owner should enable DMs "
-                "and re-run `/test-trigger-close`."
+                "⚠️ Team options are ready, but I couldn't DM them to the bot owner. "
+                f"Once DMs are enabled an admin can run `/resend-options session_id:{session_id}`, "
+                f"or set teams by hand with `/manual-match session_id:{session_id}`."
             )
         except discord.HTTPException:
             log.exception("Failed to post owner-DM-failure warning to channel")
@@ -822,6 +939,21 @@ class RecruitmentCog(commands.Cog):
         if d.weekday() != 3:
             await interaction.response.send_message("Date must be a Thursday.", ephemeral=True)
             return
+        if d < self._today():
+            await interaction.response.send_message(
+                f"{d} is in the past — pick an upcoming Thursday.", ephemeral=True
+            )
+            return
+        if not open_ended:
+            closes = signups_close_local(d, close_day, self.tz)
+            if closes <= datetime.now(self.tz):
+                await interaction.response.send_message(
+                    f"Signups would close {closes.strftime('%a %b %d, %I:%M %p')}, which has "
+                    f"already passed. Pick a later `close_day`, or use `open_ended:True` and "
+                    f"close by hand.",
+                    ephemeral=True,
+                )
+                return
         await interaction.response.defer(ephemeral=True)
         # Prefer an explicit channel, then the configured recruit channel
         # (/set-channel recruit), then fall back to the current channel.
@@ -849,7 +981,15 @@ class RecruitmentCog(commands.Cog):
             session = await self.post_recruitment(
                 d, channel=target, open_ended=open_ended, close_day=close_day
             )
+        except RecruitmentExists as e:
+            await interaction.followup.send(
+                f"There is already a recruitment for {d}: Session #{e.session_id} ({e.status}). "
+                f"Use `/cancel-session session_id:{e.session_id}` first if you want to start over.",
+                ephemeral=True,
+            )
+            return
         except Exception as e:
+            log.exception("recruit-now failed")
             await interaction.followup.send(f"Failed: {e}", ephemeral=True)
             return
         posted_in = self.bot.get_channel(session.recruit_channel_id)
@@ -885,10 +1025,7 @@ class RecruitmentCog(commands.Cog):
                     await interaction.followup.send(f"Session #{session_id} not found.", ephemeral=True)
                     return
             else:
-                session = (await db.execute(
-                    select(InhouseSession).where(InhouseSession.status == "recruiting")
-                    .order_by(InhouseSession.game_date.asc())
-                )).scalars().first()
+                session = await find_current_session(db, ("recruiting", "closed"), self._today())
                 if session is None:
                     await interaction.followup.send(
                         "No active recruiting session. Pass a `session_id` to preview a specific one.",
@@ -1002,10 +1139,7 @@ class RecruitmentCog(commands.Cog):
             return
         await interaction.response.defer(ephemeral=True)
         async with get_session() as db:
-            session = (await db.execute(
-                select(InhouseSession).where(InhouseSession.status == "recruiting")
-                .order_by(InhouseSession.game_date.asc())
-            )).scalars().first()
+            session = await find_current_session(db, ("recruiting", "closed"), self._today())
             if session is None:
                 await interaction.followup.send("No active recruiting session.", ephemeral=True)
                 return
@@ -1091,10 +1225,7 @@ class RecruitmentCog(commands.Cog):
                     await interaction.followup.send(f"Session #{session_id} not found.", ephemeral=True)
                     return
             else:
-                session = (await db.execute(
-                    select(InhouseSession).where(InhouseSession.status == "recruiting")
-                    .order_by(InhouseSession.game_date.asc())
-                )).scalars().first()
+                session = await find_current_session(db, ("recruiting", "closed"), self._today())
                 if session is None:
                     await interaction.followup.send(
                         "No active recruiting session. Pass a `session_id` to view a specific one.",
@@ -1170,10 +1301,7 @@ class RecruitmentCog(commands.Cog):
                     await interaction.followup.send(f"Session #{session_id} not found.", ephemeral=True)
                     return
             else:
-                session = (await db.execute(
-                    select(InhouseSession).where(InhouseSession.status.in_(["recruiting", "closed", "matched"]))
-                    .order_by(InhouseSession.game_date.asc())
-                )).scalars().first()
+                session = await find_current_session(db, ("recruiting", "closed", "matched"), self._today())
                 if session is None:
                     await interaction.followup.send("No active session to cancel.", ephemeral=True)
                     return
@@ -1224,10 +1352,7 @@ class RecruitmentCog(commands.Cog):
                     await interaction.followup.send(f"Session #{session_id} not found.", ephemeral=True)
                     return
             else:
-                session = (await db.execute(
-                    select(InhouseSession).where(InhouseSession.status == "recruiting")
-                    .order_by(InhouseSession.game_date.asc())
-                )).scalars().first()
+                session = await find_current_session(db, ("recruiting", "closed"), self._today())
                 if session is None:
                     await interaction.followup.send("No active recruiting session.", ephemeral=True)
                     return
@@ -1315,6 +1440,109 @@ class RecruitmentCog(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(
+        name="resend-options",
+        description="(admin) Re-send the three team options to the owner's DMs.",
+    )
+    @app_commands.describe(session_id="Session ID. Defaults to the current session awaiting a pick.")
+    async def resend_options(self, interaction: discord.Interaction, session_id: Optional[int] = None):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        async with get_session() as db:
+            if session_id is not None:
+                session = await db.get(InhouseSession, session_id)
+            else:
+                session = await find_current_session(db, ("matched",), self._today())
+            if session is None:
+                await interaction.followup.send("No session is waiting on a team pick.", ephemeral=True)
+                return
+            has_teams = (await db.execute(
+                select(Match).where(Match.session_id == session.id)
+            )).scalars().first() is not None
+            ps = (await db.execute(
+                select(ProposalSet)
+                .where(ProposalSet.session_id == session.id, ProposalSet.resolved_at.is_(None))
+                .order_by(ProposalSet.id.desc())
+            )).scalars().first()
+            sid, status = session.id, session.status
+        if has_teams:
+            await interaction.followup.send(
+                f"Session #{sid} already has teams — see `/matches`.", ephemeral=True)
+            return
+        if status != "matched" or ps is None:
+            await interaction.followup.send(
+                f"Session #{sid} has no pending options (status: {status}). "
+                f"Generate them with `/test-trigger-close session_id:{sid}`.",
+                ephemeral=True,
+            )
+            return
+        delivered = await self._send_proposal_dm(ps.id)
+        await interaction.followup.send(
+            f"✅ Re-sent the options for Session #{sid} to <@{self.config.owner_discord_id}>."
+            if delivered else
+            f"❌ Still couldn't DM <@{self.config.owner_discord_id}> — they need to allow DMs from "
+            f"this server. `/manual-match session_id:{sid}` sets teams by hand.",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @app_commands.command(
+        name="reopen-signups",
+        description="(admin) Re-open signups for a closed, cancelled or awaiting-pick session.",
+    )
+    @app_commands.describe(session_id="Session ID to re-open (from the recruitment footer).")
+    async def reopen_signups(self, interaction: discord.Interaction, session_id: int):
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message("League Admin only.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        async with get_session() as db:
+            session = await db.get(InhouseSession, session_id)
+            if session is None:
+                await interaction.followup.send(f"Session #{session_id} not found.", ephemeral=True)
+                return
+            if session.status == "recruiting":
+                await interaction.followup.send(f"Session #{session_id} is already open.", ephemeral=True)
+                return
+            has_teams = (await db.execute(
+                select(Match).where(Match.session_id == session.id)
+            )).scalars().first() is not None
+            if session.status == "completed" or has_teams:
+                await interaction.followup.send(
+                    f"Session #{session_id} already has teams set, so signups can't be re-opened. "
+                    f"Edit the roster with `/manual-match` instead.",
+                    ephemeral=True,
+                )
+                return
+            prev = session.status
+            # Unanswered options were built from the old signup list.
+            for ps in (await db.execute(
+                select(ProposalSet).where(
+                    ProposalSet.session_id == session.id, ProposalSet.resolved_at.is_(None))
+            )).scalars().all():
+                ps.resolved_at = datetime.utcnow()
+            session.status = "recruiting"
+            session.signups_close_at = None  # manual from here: no surprise auto-close
+            session.close_notice = None
+            channel_id, game_date = session.recruit_channel_id, session.game_date
+            await db.commit()
+
+        await _refresh_public_counts(interaction.client, session_id)
+        ch = self.bot.get_channel(channel_id) if channel_id else None
+        if ch is not None:
+            try:
+                await ch.send(
+                    f"🔓 Signups re-opened for **{game_date.strftime('%a %b %d')}** (Session #{session_id})."
+                )
+            except discord.HTTPException:
+                log.exception("Failed to post reopen notice")
+        await interaction.followup.send(
+            f"✅ Re-opened Session #{session_id} (was {prev}). It won't auto-close: when the list "
+            f"is right, run `/test-trigger-close session_id:{session_id}` to make teams.",
+            ephemeral=True,
+        )
+
     # ---------- Helpers ----------
 
     async def _is_admin(self, interaction: discord.Interaction) -> bool:
@@ -1329,12 +1557,9 @@ class RecruitmentCog(commands.Cog):
             ch = self.bot.get_channel(cfg.recruit_channel_id)
             if isinstance(ch, discord.TextChannel):
                 return ch
-        guild = self.bot.get_guild(self.config.discord_guild_id)
-        if guild is None:
-            return None
-        for ch in guild.text_channels:
-            if ch.permissions_for(guild.me).send_messages:
-                return ch
+        # No configured channel: return None and let the caller decide. (This used
+        # to fall back to the first channel the bot could post in, which could put
+        # a recruitment in an unrelated channel.)
         return None
 
     @staticmethod
