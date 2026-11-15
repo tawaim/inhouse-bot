@@ -21,6 +21,16 @@ Remove-Item ./data/prod_inhouse.db -Force
 
 The pulled file lands at `./data/prod_inhouse.db` (gitignored).
 
+### Backups
+
+The bot writes a copy of the database to `/data/backups/` every time it boots (before migrations run) and before `/clear-matches` and `/reseed-all`, keeping the newest 14. To restore one, stop relying on memory and list them first:
+
+```powershell
+~/.fly/bin/fly ssh console -a inhouse-league-bot -C "ls -la /data/backups"
+```
+
+Replacing `/data/inhouse.db` by hand: upload the new file under another name, `mv` it over `inhouse.db`, then restart the machine straight away (`fly machine restart`). The running bot keeps the old file open until it restarts. The database deliberately stays in SQLite's default single-file journal mode (not WAL) so that pulling or replacing `inhouse.db` alone is always complete.
+
 ### Schema notes
 
 - Players are identified by `discord_id`. Display names are **not** stored — only `riot_game_name`, `riot_tag_line`, and `discord_id`.

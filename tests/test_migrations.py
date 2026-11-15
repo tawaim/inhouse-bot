@@ -313,7 +313,7 @@ def test_failed_column_add_is_fatal(tmp_path):
     assert {n for n in _schema(db) if not n.startswith("sqlite_")} == {"aliases"}
 
 
-def test_connections_use_wal_and_busy_timeout(tmp_path):
+def test_connections_use_busy_timeout_and_single_file_journal(tmp_path):
     cfg = _config(str(tmp_path / "pragmas.db"))
 
     async def body():
@@ -321,7 +321,8 @@ def test_connections_use_wal_and_busy_timeout(tmp_path):
         try:
             async with get_session() as s:
                 conn = await s.connection()
-                assert (await conn.exec_driver_sql("PRAGMA journal_mode")).scalar() == "wal"
+                # Not WAL: the DB is pulled/replaced as one file (see CLAUDE.md).
+                assert (await conn.exec_driver_sql("PRAGMA journal_mode")).scalar() == "delete"
                 assert (await conn.exec_driver_sql("PRAGMA busy_timeout")).scalar() == 15000
                 assert (await conn.exec_driver_sql("PRAGMA foreign_keys")).scalar() == 0
         finally:

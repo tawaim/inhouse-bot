@@ -38,17 +38,21 @@ def database_file(database_url: str) -> Optional[Path]:
 
 
 def _set_sqlite_pragmas(dbapi_connection, _record) -> None:
-    """Runs on every new connection. WAL lets readers proceed while one writer
-    holds the lock; busy_timeout makes a second writer wait instead of failing
-    immediately with 'database is locked'.
+    """Runs on every new connection. busy_timeout makes a second writer wait
+    instead of failing immediately with 'database is locked'.
 
     Deliberately does NOT enable PRAGMA foreign_keys: the bot has always run
     with them off and the delete paths rely on that.
+
+    Deliberately stays in the default rollback-journal mode (not WAL): the
+    database is pulled and replaced as a single file (`fly ssh sftp`, see
+    CLAUDE.md), and in WAL mode recent commits live in a separate -wal file, so
+    a pulled copy could be silently stale. No transaction here spans a network
+    call, so the extra reader concurrency isn't needed.
     """
     cur = dbapi_connection.cursor()
     try:
         cur.execute("PRAGMA busy_timeout=15000")
-        cur.execute("PRAGMA journal_mode=WAL")
     finally:
         cur.close()
 
