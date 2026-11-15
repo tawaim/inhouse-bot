@@ -416,8 +416,11 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
                 color=discord.Color.green(),
             )
             all_ids = list(chosen["team1"].values()) + list(chosen["team2"].values())
+            # The pick is clicked in a DM, so interaction.guild is None — resolve
+            # display names through the recruit channel's guild instead.
+            guild = getattr(channel, "guild", None)
             name_map = {
-                uid: (m.display_name if (m := interaction.guild.get_member(uid)) else str(uid))
+                uid: (m.display_name if guild and (m := guild.get_member(uid)) else str(uid))
                 for uid in all_ids
             }
             embed.add_field(name=f"🔵 {TEAM_NAMES[1]} (Blue)", value=_team_lines(chosen["team1"], name_map=name_map), inline=True)
@@ -431,7 +434,17 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
                 text=f"Match {match.id} · Session #{session.id} (Option {label}) · "
                      f"{balance_part} · Game time: Thu 9:00 PM ET"
             )
-            await channel.send(content="🔒 Teams finalized:", embed=embed)
+            try:
+                await channel.send(content="🔒 Teams finalized:", embed=embed)
+                return
+            except discord.HTTPException:
+                log.exception("Failed to post final teams for session %s", session.id)
+    # Reached only when the public post didn't happen — the DM above already said
+    # "Posted", so correct it rather than leave the owner thinking teams went out.
+    await interaction.followup.send(
+        f"⚠️ Option {label} is saved as Match {match.id}, but I couldn't post the teams "
+        f"to the recruit channel. Share them with `/match-roster match_id:{match.id}`."
+    )
 
 
 # =============================================================================
