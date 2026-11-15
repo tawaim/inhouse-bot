@@ -29,12 +29,16 @@ from typing import Any, Callable, Optional
 import discord
 from sqlalchemy import select
 
+import json
+
 from bot.config import ROLES, Config
 from bot.db.models import (
-    GuildConfig, Match, Player, ProposalSet, Rating, Session as InhouseSession, Signup,
+    Alias, GameStat, GuildConfig, Match, Player, ProposalSet, Rating,
+    Session as InhouseSession, Signup,
 )
 from bot.db.session import close_db, get_session, init_db
 from bot.services.elo import INHOUSE_ROLE
+from bot.services.ocr import ParsedScoreboard, ScoreRow
 
 ADMIN_ROLE = "League Admin"
 GUILD_ID = 1000
@@ -194,6 +198,7 @@ class FakeMember(discord.Member):
 class FakeGuild:
     def __init__(self):
         self.id = GUILD_ID
+        self.chunked = True  # member cache is "complete"; the bot skips guild.chunk()
         self.members: dict[int, FakeMember] = {}
         self.channels: dict[int, FakeChannel] = {}
         self.roles: list = []
@@ -310,6 +315,66 @@ class FakeInteraction:
     def text(self) -> str:
         """Everything the invoking user was shown, flattened."""
         return "\n".join(m.text for m in self.replies)
+
+
+# --------------------------------------------------------------------------- /report inputs
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64  # passes the bot's image sniffing; never decoded
+
+
+class FakeAttachment:
+    """A file uploaded with a slash command (e.g. /report's game screenshots)."""
+
+    def __init__(self, filename: str = "game.png", data: bytes = PNG_BYTES,
+                 content_type: Optional[str] = "image/png", size: Optional[int] = None):
+        self.id = next(_ids)
+        self.filename = filename
+        self.content_type = content_type
+        self.size = len(data) if size is None else size
+        self.url = f"https://cdn.invalid/{self.id}/{filename}"
+        self._data = data
+        self.reads = 0
+
+    async def read(self) -> bytes:
+        self.reads += 1
+        return self._data
+
+
+def make_board(team1: list, team2: list, winner: Optional[int] = None, **fields) -> ParsedScoreboard:
+    """What the vision model would return for one game screenshot.
+
+    `team1`/`team2` are the rows of the TOP and BOTTOM screenshot teams in DISPLAY
+    order. Each row is a name, or (name, champion), or (name, champion, (k, d, a)).
+    `winner` is the screenshot team (1/2) that won, if the read could tell.
+    Extra ParsedScoreboard fields (notes=..., banner=...) pass through.
+    """
+    def row(r) -> ScoreRow:
+        r = (r,) if isinstance(r, str) else tuple(r)
+        name = r[0]
+        champ = r[1] if len(r) > 1 else None
+        k, d, a = r[2] if len(r) > 2 else (None, None, None)
+        return ScoreRow(raw=name, name_guess=name, champion=champ, kills=k, deaths=d, assists=a)
+
+    return ParsedScoreboard(team1=[row(r) for r in team1], team2=[row(r) for r in team2],
+                            winner=winner, **fields)
+
+
+def failed_board(note: str = "Vision read failed (simulated). Enter the lineup manually.") -> ParsedScoreboard:
+    """What parse_scoreboard_image returns when the read fails: no rows, one note."""
+    return ParsedScoreboard(notes=[note])
+
+
+def find_item(view, label: Optional[str] = None, cls: Optional[type] = None):
+    """A component on a view, by (part of) its label and/or its class."""
+    for item in view.children:
+        if cls is not None and not isinstance(item, cls):
+            continue
+        if label is not None and label.lower() not in (getattr(item, "label", None) or "").lower():
+            continue
+        return item
+    raise AssertionError(
+        f"no component matching label={label!r} cls={cls} among "
+        f"{[(type(c).__name__, getattr(c, 'label', None)) for c in view.children]}")
 
 
 # --------------------------------------------------------------------------- external APIs
@@ -499,6 +564,92 @@ class World:
         ix = self.ix(self.owner, channel=self.owner.dm, message=msg, in_dm=True)
         await _handle_proposal_pick(ix, index)
         return ix
+
+    # ---- reporting results, via the real /report command and its confirm view
+    async def add_match(self, team1, team2, session_id: Optional[int] = None,
+                        predicted_balance: Optional[float] = None) -> int:
+        """Create an unreported match. Teams are {role: id} dicts, or 5 ids/members
+        in role order (TOP, JUNGLE, MID, BOT, SUPPORT)."""
+        def roster(t) -> dict[str, int]:
+            if isinstance(t, dict):
+                return {r: int(getattr(v, "id", v)) for r, v in t.items()}
+            return {r: int(getattr(v, "id", v)) for r, v in zip(ROLES, t)}
+
+        async with get_session() as db:
+            m = Match(session_id=session_id, team1_json=json.dumps(roster(team1)),
+                      team2_json=json.dumps(roster(team2)), predicted_balance=predicted_balance)
+            db.add(m)
+            await db.commit()
+            await db.refresh(m)
+            return m.id
+
+    async def report(self, match_id: int, boards: list, user: Optional[FakeMember] = None,
+                     attachments: Optional[list] = None) -> FakeInteraction:
+        """Run /report with one screenshot per entry of `boards`. No vision call is
+        made: each screenshot "reads" as the matching ParsedScoreboard (see
+        make_board / failed_board). The confirm view is `world.report_view(ix)`."""
+        import bot.cogs.admin as admin_module
+
+        # Distinct bytes per screenshot: the reads run concurrently, so each board is
+        # looked up by the image it belongs to rather than by call order. (Pass
+        # `attachments` with distinct data too if you supply your own.)
+        atts = attachments or [FakeAttachment(f"game{i + 1}.png", PNG_BYTES + bytes([i]))
+                               for i in range(len(boards))]
+        by_image = {a._data: b for a, b in zip(atts, boards)}
+        real = admin_module.parse_scoreboard_image
+        admin_module.parse_scoreboard_image = lambda image_bytes: by_image[image_bytes]
+        try:
+            kwargs = {f"game{i + 1}": a for i, a in enumerate(atts)}
+            return await self.run(self.admin_cog.report, user=user, match_id=match_id, **kwargs)
+        finally:
+            admin_module.parse_scoreboard_image = real
+
+    @staticmethod
+    def report_view(ix: FakeInteraction):
+        """The ReportConfirmView attached to /report's confirm message."""
+        view = ix.replies[-1].view
+        assert view is not None, f"/report sent no confirm view: {ix.text}"
+        return view
+
+    async def click(self, item, user: Optional[FakeMember] = None, values: Optional[list] = None,
+                    message: Optional[FakeMessage] = None) -> FakeInteraction:
+        """Click a button, or choose `values` in a select, on a live view. Runs the
+        view's interaction_check first, like Discord does."""
+        view = item.view
+        ix = self.ix(user, message=message if message is not None else getattr(view, "message", None))
+        if values is not None:
+            item._values = list(values)
+        if await view.interaction_check(ix):
+            await item.callback(ix)
+        return ix
+
+    async def set_winners(self, view, winners: list[int], user: Optional[FakeMember] = None) -> None:
+        """Press each game's winner button until the view shows `winners` (1/2 per game)."""
+        from bot.cogs.admin import _WinnerButton
+
+        for gi, want in enumerate(winners):
+            btn = next(c for c in view.children if isinstance(c, _WinnerButton) and c.gi == gi)
+            for _ in range(2):
+                if view.state.winners[gi] == want:
+                    break
+                await self.click(btn, user)
+            assert view.state.winners[gi] == want
+
+    async def game_stats(self, match_id: Optional[int] = None) -> list[GameStat]:
+        async with get_session() as db:
+            q = select(GameStat).order_by(GameStat.match_id, GameStat.game_no, GameStat.discord_id)
+            if match_id is not None:
+                q = q.where(GameStat.match_id == match_id)
+            return list((await db.execute(q)).scalars().all())
+
+    async def aliases(self) -> dict[str, int]:
+        """alias_norm -> discord_id for every stored alias."""
+        async with get_session() as db:
+            return {a.alias_norm: a.discord_id for a in (await db.execute(select(Alias))).scalars().all()}
+
+    async def match(self, match_id: int) -> Match:
+        async with get_session() as db:
+            return await db.get(Match, match_id)
 
     # ---- reading state
     async def session(self, session_id: int) -> InhouseSession:

@@ -292,9 +292,15 @@ def update_elo_team_game(
     return player_elo + delta, delta
 
 
+# The only results a best-of-3 (or a single game) can end on, as (team1, team2).
+VALID_SERIES_SCORES = frozenset({(2, 0), (2, 1), (1, 2), (0, 2), (1, 0), (0, 1)})
+
+
 def parse_series_score(score: str) -> tuple[int, int]:
-    """Parse '2-0', '2-1', '1-2', '0-2' (or '2:0' etc.) into (team1_wins, team2_wins).
-    Returns (-1, -1) on invalid input.
+    """Parse '2-0', '2-1', '1-2', '0-2' (or a single game: '1-0', '0-1'; ':' also
+    works as the separator) into (team1_wins, team2_wins).
+    Returns (-1, -1) for anything else — ties, 3-0, 5-0 and so on are not results
+    a best-of-3 can end on.
     """
     cleaned = score.strip().replace(":", "-").replace(" ", "")
     parts = cleaned.split("-")
@@ -304,10 +310,7 @@ def parse_series_score(score: str) -> tuple[int, int]:
         a, b = int(parts[0]), int(parts[1])
     except ValueError:
         return (-1, -1)
-    # Allow any best-of-N up to 5; reject negatives and ties
-    if a < 0 or b < 0 or a == b:
-        return (-1, -1)
-    if max(a, b) > 5:
+    if (a, b) not in VALID_SERIES_SCORES:
         return (-1, -1)
     return (a, b)
 
