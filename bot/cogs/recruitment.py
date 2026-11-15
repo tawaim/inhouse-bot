@@ -47,7 +47,7 @@ from bot.services.matchmaking import (
     make_match,
     make_top_matches,
 )
-from bot.cogs.admin import TEAM_NAMES, format_roster_block
+from bot.services.rosters import TEAM_NAMES, format_roster_block
 
 log = logging.getLogger(__name__)
 
