@@ -17,6 +17,7 @@ from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import delete, func, select, update
 
+from bot.cogs.recruitment import RecruitmentCog
 from bot.config import Config, ROLES, format_team_lines
 from bot.db.models import Alias, GameStat, GuildConfig, Match, MatchPerformance, Player, ProposalSet, Rating, Session as InhouseSession, Signup
 from bot.db.session import get_session
@@ -40,6 +41,7 @@ from bot.services.names import (  # noqa: F401  (re-exported for callers of bot.
 )
 from bot.services import results, seeding
 from bot.services.ratings_lock import ratings_lock
+from bot.services.sessions import find_current_session
 from bot.services.rosters import (  # noqa: F401  (re-exported for callers of bot.cogs.admin)
     TEAM_NAMES,
     ManualMatchParseError,
@@ -2033,7 +2035,6 @@ class AdminCog(commands.Cog):
             return
         await interaction.response.defer(ephemeral=True)
 
-        from bot.cogs.recruitment import RecruitmentCog, find_current_session
         cog = self.bot.get_cog("RecruitmentCog")
         if not isinstance(cog, RecruitmentCog):
             await interaction.followup.send("Recruitment cog not loaded.", ephemeral=True)
@@ -2125,8 +2126,6 @@ class AdminCog(commands.Cog):
                 # never a stale one whose game date has passed. An old session
                 # left open used to capture new matches (one got attached to a
                 # session two months earlier).
-                import pytz
-                from bot.cogs.recruitment import find_current_session
                 today = datetime.now(pytz.timezone(self.config.timezone)).date()
                 session = await find_current_session(db, ("recruiting", "closed", "matched"), today)
                 if session is None:
