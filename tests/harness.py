@@ -199,6 +199,7 @@ class FakeGuild:
         self.roles: list = []
         self.default_role = types.SimpleNamespace(name="@everyone", id=GUILD_ID)
         self.me = FakeMember(999, "bot", self, bot=True)
+        self.chunked = True  # the member cache is always complete here
 
     def get_member(self, uid):
         return self.members.get(int(uid))
@@ -315,36 +316,58 @@ class FakeInteraction:
 # --------------------------------------------------------------------------- external APIs
 
 class FakeRiot:
-    """Riot API stand-in. `ranks[puuid] = (tier, division, lp)`; missing = unranked."""
+    """Riot API stand-in. `ranks[puuid] = (tier, division, lp)`; missing = unranked.
+
+    Failure injection: `fail` raises on every call; `fail_puuids[puuid]` raises on
+    calls about that one account; `before_call` is an async callable awaited once
+    at the start of the next call (to simulate something happening concurrently
+    while the bot is waiting on Riot).
+    """
 
     def __init__(self):
         self.ranks: dict[str, tuple[str, str, int]] = {}
         self.accounts: dict[str, str] = {}  # "name#tag" (lowercased) -> puuid
+        self.names: dict[str, tuple[str, str]] = {}  # puuid -> current (game_name, tag_line); set to simulate a rename
         self.fail: Optional[Exception] = None
+        self.fail_puuids: dict[str, Exception] = {}
+        self.before_call: Optional[Callable] = None
         self.calls = 0
 
-    def _maybe_fail(self):
+    async def _maybe_fail(self, puuid=None):
         self.calls += 1
+        hook, self.before_call = self.before_call, None
+        if hook is not None:
+            await hook()
         if self.fail is not None:
             raise self.fail
+        if puuid in self.fail_puuids:
+            raise self.fail_puuids[puuid]
 
     async def get_account_by_riot_id(self, game_name, tag_line):
-        self._maybe_fail()
+        await self._maybe_fail()
         from bot.services.riot_client import RiotAccount
         puuid = self.accounts.get(f"{game_name}#{tag_line}".lower())
         if puuid is None:
             return None
         return RiotAccount(puuid=puuid, game_name=game_name, tag_line=tag_line)
 
+    async def get_account_by_puuid(self, puuid):
+        await self._maybe_fail(puuid)
+        from bot.services.riot_client import RiotAccount
+        name = self.names.get(puuid)
+        if name is None:
+            return None
+        return RiotAccount(puuid=puuid, game_name=name[0], tag_line=name[1])
+
     async def get_solo_rank(self, puuid):
-        self._maybe_fail()
+        await self._maybe_fail(puuid)
         r = self.ranks.get(puuid)
         if r is None:
             return None
         return types.SimpleNamespace(queue_type="RANKED_SOLO_5x5", tier=r[0], rank=r[1], league_points=r[2])
 
     async def infer_primary_role(self, puuid, sample: int = 20):
-        self._maybe_fail()
+        await self._maybe_fail(puuid)
         return None
 
     async def close(self):
@@ -354,8 +377,10 @@ class FakeRiot:
 class FakeOpgg:
     def __init__(self):
         self.past: dict[str, Any] = {}  # "name#tag" (lowercased) -> PastSeasonRank-like
+        self.lookups: list[str] = []    # every "name#tag" asked about, in order
 
     async def get_past_season_rank(self, game_name, tag_line, region):
+        self.lookups.append(f"{game_name}#{tag_line}")
         return self.past.get(f"{game_name}#{tag_line}".lower())
 
     async def close(self):
@@ -489,6 +514,42 @@ class World:
             if m.view is not None:
                 return m
         return None
+
+    # ---- account linking, via the real handlers
+    def link_request_message(self, member: Optional[FakeMember] = None) -> Optional[FakeMessage]:
+        """The latest link-approval DM to the owner (optionally: about `member`)."""
+        for m in reversed(self.owner.dm.sent):
+            if m.embeds and "Link Request" in (m.embeds[0].title or ""):
+                if member is None or f"Discord ID: {member.id} " in m.text:
+                    return m
+        return None
+
+    async def approve_link(self, message: Optional[FakeMessage] = None,
+                           user: Optional[FakeMember] = None) -> FakeInteraction:
+        """Owner clicks Approve on a link-request DM."""
+        msg = message or self.link_request_message()
+        assert msg is not None, "no link request DM was sent to the owner"
+        ix = self.ix(user or self.owner, channel=self.owner.dm, message=msg, in_dm=True)
+        await msg.view.approve.callback(ix)
+        return ix
+
+    async def reject_link(self, message: Optional[FakeMessage] = None, reason: str = "no",
+                          user: Optional[FakeMember] = None) -> FakeInteraction:
+        """Owner clicks Reject on a link-request DM and submits the reason modal."""
+        msg = message or self.link_request_message()
+        assert msg is not None, "no link request DM was sent to the owner"
+        ix = self.ix(user or self.owner, channel=self.owner.dm, message=msg, in_dm=True)
+        await msg.view.reject.callback(ix)
+        if ix.modal is None:  # refused before the modal (e.g. not the owner)
+            return ix
+        ix.modal.reason._value = reason
+        submit = self.ix(user or self.owner, channel=self.owner.dm, message=msg, in_dm=True)
+        await ix.modal.on_submit(submit)
+        return submit
+
+    async def player(self, discord_id: int) -> Optional[Player]:
+        async with get_session() as db:
+            return await db.get(Player, discord_id)
 
     async def pick(self, index: int, message: Optional[FakeMessage] = None) -> FakeInteraction:
         """Owner clicks Pick Option A/B/C in their DM (guild is None there)."""

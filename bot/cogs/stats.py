@@ -8,7 +8,7 @@ from discord import app_commands
 from discord.ext import commands
 from collections import defaultdict
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from bot.db.models import GameStat, Match, MatchPerformance, Player, Rating
 from bot.db.session import get_session
@@ -44,9 +44,12 @@ class StatsCog(commands.Cog):
                 .join(Match, Match.id == MatchPerformance.match_id)
                 .where(Match.winner.isnot(None))
             )
-            if role:
-                perf_stmt = perf_stmt.where(MatchPerformance.role == role)
             perf_rows = (await db.execute(perf_stmt)).all()
+            game_rows = (await db.execute(
+                select(GameStat)
+                .join(Match, Match.id == GameStat.match_id)
+                .where(Match.winner.isnot(None))
+            )).scalars().all()
 
             inhouse_ratings = {
                 r.discord_id: r
@@ -67,7 +70,31 @@ class StatsCog(commands.Cog):
         stats: dict[int, dict] = defaultdict(lambda: {
             "game_wins": 0, "game_losses": 0, "series_wins": 0, "series_losses": 0,
         })
+        #
+        # Matches reported game by game have GameStat rows: one per player per
+        # game actually played, with the role played in THAT game. Count games
+        # from those, so a sub who played one game of a 2-1 gets one game (not
+        # 2-1) and a role filter credits the role really played. Only matches
+        # with no GameStat rows (score-only reports) fall back to crediting the
+        # series score to everyone on the series row.
+        matches_with_games = {g.match_id for g in game_rows}
+        counted: set[tuple[int, int]] = set()  # (match_id, discord_id) with a counted game
+        for g in game_rows:
+            if role and g.role != role:
+                continue
+            s = stats[g.discord_id]
+            s["game_wins" if g.won else "game_losses"] += 1
+            counted.add((g.match_id, g.discord_id))
         for perf, match in perf_rows:
+            if match.id in matches_with_games:
+                # Series credit goes to whoever has a counted game in it.
+                if (match.id, perf.discord_id) not in counted:
+                    continue
+                s = stats[perf.discord_id]
+                s["series_wins" if perf.won else "series_losses"] += 1
+                continue
+            if role and perf.role != role:
+                continue
             s = stats[perf.discord_id]
             won_games = max(match.team1_wins, match.team2_wins)
             lost_games = min(match.team1_wins, match.team2_wins)
@@ -176,8 +203,13 @@ class StatsCog(commands.Cog):
             when = day.strftime("%b %d") if day else "—"
             wl = "🟢 W" if perf.won else "🔴 L"
             d = perf.inhouse_elo_delta or 0
+            # Show the score from this player's side (their games first): the
+            # series winner has the larger number whichever team they were on.
+            hi = max(match.team1_wins, match.team2_wins)
+            lo = min(match.team1_wins, match.team2_wins)
+            mine, theirs = (hi, lo) if perf.won else (lo, hi)
             lines.append(
-                f"`{when}` {wl} {match.team1_wins}-{match.team2_wins} · "
+                f"`{when}` {wl} {mine}-{theirs} · "
                 f"{perf.role} · **{d:+d}** (net {cum:+d})"
             )
 
@@ -323,7 +355,13 @@ class StatsCog(commands.Cog):
                 select(GameStat, Match)
                 .join(Match, Match.id == GameStat.match_id)
                 .where(GameStat.discord_id == target.id)
-                .order_by(GameStat.match_id.desc(), GameStat.game_no.desc())
+                # Newest first by when the series was PLAYED. Match ids follow
+                # entry order, and back-filled older series get newer ids.
+                .order_by(
+                    func.coalesce(Match.game_date, func.date(Match.reported_at)).desc(),
+                    GameStat.match_id.desc(),
+                    GameStat.game_no.desc(),
+                )
                 .limit(count)
             )).all()
 

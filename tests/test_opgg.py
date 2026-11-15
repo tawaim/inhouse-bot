@@ -76,3 +76,18 @@ def test_region_mapping():
     assert opgg_region("kr") == "kr"
     # Unknown platform: strip trailing digits as a best-effort fallback.
     assert opgg_region("zz9") == "zz"
+
+
+def test_parse_flags_a_past_rank_with_no_usable_date():
+    """A rank without a placement date must be distinguishable from "placed this
+    season" (seasons_elapsed == 0), so a sync can keep the existing seed."""
+    assert parse_past_season(SAMPLE).date_known is True
+
+    no_date = 'Summoner([PreviousSeason(33,TierInfo("GOLD",2))],[])'
+    r = parse_past_season(no_date)
+    assert (r.tier, r.division, r.seasons_elapsed) == ("GOLD", "II", 0)
+    assert r.date_known is False
+
+    bad_date = ('Summoner([PreviousSeason(33,TierInfo("GOLD",2))],[PreviousSeasonTier(33,'
+                '[RankEntrie("SOLORANKED",RankInfo("GOLD",2,"sometime last year"))])])')
+    assert parse_past_season(bad_date).date_known is False

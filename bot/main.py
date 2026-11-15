@@ -34,7 +34,9 @@ async def amain() -> None:
     intents.message_content = False     # we use slash commands + buttons, no message content needed
     intents.members = True              # for role checks
 
-    bot = commands.Bot(command_prefix="!", intents=intents)
+    # Slash commands only. A text prefix like "!" needs the message_content intent
+    # (discord.py warns on every boot without it); mention-only needs nothing.
+    bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
     riot = RiotClient(
         api_key=config.riot_api_key,
         region=config.riot_region,
@@ -49,13 +51,21 @@ async def amain() -> None:
     await bot.add_cog(AdminCog(bot, config, riot, opgg))
     await bot.add_cog(StatsCog(bot))
 
+    commands_synced = False
+
     @bot.event
     async def on_ready():
+        nonlocal commands_synced
         log.info("Logged in as %s (%s)", bot.user, bot.user.id)
+        # on_ready fires again after every gateway reconnect; the command list
+        # can't change within a process, so sync once (retrying if it failed).
+        if commands_synced:
+            return
         # Sync slash commands to the configured guild for fast iteration
         guild = discord.Object(id=config.discord_guild_id)
         bot.tree.copy_global_to(guild=guild)
         synced = await bot.tree.sync(guild=guild)
+        commands_synced = True
         log.info("Synced %d slash commands to guild %s", len(synced), config.discord_guild_id)
 
     scheduler = setup_scheduler(bot, config)
@@ -88,6 +98,13 @@ async def amain() -> None:
     await close_db()
     for task in pending:
         task.cancel()
+
+    # If the bot itself died (bad token, privileged intent not enabled, ...),
+    # surface it: otherwise the exception is never retrieved, the process exits
+    # 0 and nothing looks wrong. Re-raising makes the exit code non-zero.
+    if bot_task in done and not bot_task.cancelled() and bot_task.exception() is not None:
+        log.error("Bot stopped with an error: %r", bot_task.exception())
+        raise bot_task.exception()
 
 
 def main() -> None:
