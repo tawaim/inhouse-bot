@@ -211,8 +211,18 @@ async def test_done_after_close_is_not_saved(world):
 async def test_eleven_signups_benches_the_last(world):
     players, session = await _filled_session(world, n=11)
     assert await world.close(session.id) == "matched"
-    bench = next(t for t in world.recruit_channel.texts if "bench" in t)
-    assert players[-1].mention in bench and players[0].mention not in bench
+    options = world.owner_options_message().text
+    assert players[-1].mention not in options and players[0].mention in options
+
+
+@flow
+async def test_making_teams_posts_nothing_in_the_recruit_channel(world):
+    """Used to post 'Signups closed ... Teams being finalized' and the bench list."""
+    players, session = await _filled_session(world, n=11)
+    before = list(world.recruit_channel.texts)
+    assert await world.close(session.id) == "matched"
+    assert world.recruit_channel.texts == before
+    assert world.owner_options_message() is not None
 
 
 # ------------------------------------------------------------------ owner DM + recovery
@@ -235,15 +245,6 @@ async def test_owner_dm_failure_is_recoverable_with_resend(world):
     await world.pick(0)
     assert len(await world.matches(session.id)) == 1
     assert any("Teams finalized" in t for t in world.recruit_channel.texts)
-
-
-@flow
-async def test_failed_public_notice_does_not_block_owner_dm(world):
-    """A failed channel post after the match was saved used to skip the DM entirely."""
-    players, session = await _filled_session(world)
-    world.recruit_channel.fail_sends = 5
-    assert await world.close(session.id) == "matched"
-    assert world.owner_options_message() is not None
 
 
 @flow

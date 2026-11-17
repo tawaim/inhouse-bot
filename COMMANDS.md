@@ -406,7 +406,7 @@ These run automatically. (Recruitments themselves are posted manually via `/recr
 Each recruitment stores its own close time (9:30 PM ET on the `close_day` you chose). On every pass, for each recruiting session whose close time has arrived:
 1. Counts `playing` signups (ignores Not Playing and Commentator).
 2. Fewer than 10, or the picked roles can't fill two teams: signups **stay open**, one notice is posted in the recruit channel, and the bot tries again on the next pass. Teams are made as soon as it becomes possible.
-3. 10 or more: refreshes ranks, runs the matchmaker, DMs you the top 10 options, and posts a "teams being finalized" notice.
+3. 10 or more: refreshes ranks, runs the matchmaker, and DMs you the top 10 options. Nothing is posted in the recruit channel until you pick one.
 
 Because it polls, a close that was missed while the bot was restarting is picked up within minutes. Sessions still open more than a day after their game date are marked cancelled automatically.
 

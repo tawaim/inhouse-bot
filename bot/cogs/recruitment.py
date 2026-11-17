@@ -261,22 +261,8 @@ class RecruitmentCog(commands.Cog):
             await db.commit()
             await db.refresh(proposal_set)
 
-            chosen_ids = {s.discord_id for s in ordered}
-            bench = [s.discord_id for s in playing_signups if s.discord_id not in chosen_ids]
-            date_label = session.game_date.strftime('%a %b %d')
-
-        # The options are saved. Public notices are best-effort: a failed post must
-        # never stop the owner from getting the options.
-        try:
-            await channel.send(
-                f"🔒 Signups closed for **{date_label}** "
-                f"(Session #{session_id}). Teams being finalized — check back shortly."
-            )
-            if bench:
-                await channel.send("🪑 On the bench this week: " + " ".join(f"<@{i}>" for i in bench))
-        except discord.HTTPException:
-            log.exception("Could not post the signups-closed notice for session %s", session_id)
-
+        # Nothing is posted publicly here: the channel hears about it when the
+        # owner picks an option and the final teams go up.
         delivered = await self._send_proposal_dm(proposal_set.id)
         return "matched" if delivered else "dm_failed"
 
