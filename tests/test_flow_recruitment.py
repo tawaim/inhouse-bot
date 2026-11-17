@@ -358,6 +358,56 @@ async def test_owner_gets_ten_options_and_can_pick_a_late_one(world):
 
 
 @flow
+async def test_final_teams_post_shows_each_players_elo_in_their_role(world):
+    """The final teams post listed names only."""
+    from bot.db.models import Rating
+    from bot.db.session import get_session
+
+    players, session = await _filled_session(world)
+    async with get_session() as db:                         # make role elos differ per role
+        for p in players:
+            for bump, role in enumerate(["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]):
+                (await db.get(Rating, (p.id, role))).elo += bump
+        await db.commit()
+    await world.close(session.id)
+    await world.pick(0)
+    final = next(t for t in world.recruit_channel.texts if "Teams finalized" in t)
+    match = (await world.matches(session.id))[0]
+    ratings = await world.ratings()
+    seated = {**json.loads(match.team1_json), **{f"2{r}": u for r, u in json.loads(match.team2_json).items()}}
+    assert len(seated) == 10
+    for role, uid in seated.items():
+        role = role.lstrip("2")
+        assert f"P{uid} ({ratings[(uid, role)][0]})" in final
+
+
+@flow
+async def test_picking_an_option_builds_the_team_channels(world):
+    """Picking an option used to leave the team channels to a separate /match-channels run."""
+    players, session = await _filled_session(world)
+    category = await world.add_match_category()
+    await world.close(session.id)
+    done = await world.pick(0)
+    match = (await world.matches(session.id))[0]
+
+    assert "team channels ready" in done.text
+    assert sorted(c.name for c in category.text_channels) == ["lo-gang", "team-10"]
+    for chan_name, roster in (("lo-gang", match.team1_json), ("team-10", match.team2_json)):
+        intro = next(c for c in category.text_channels if c.name == chan_name).texts[0]
+        assert all(f"<@{uid}>" in intro.split("Vs.")[0] for uid in json.loads(roster).values())
+
+
+@flow
+async def test_pick_still_commits_when_no_match_category_is_set(world):
+    players, session = await _filled_session(world)
+    await world.close(session.id)
+    done = await world.pick(0)
+    assert "No match category configured" in done.text
+    assert len(await world.matches(session.id)) == 1
+    assert any("Teams finalized" in t for t in world.recruit_channel.texts)
+
+
+@flow
 async def test_make_teams_reruns_a_session_awaiting_a_pick(world):
     """Re-running used to need /reopen-signups first: /make-teams said the session wasn't open."""
     players, session = await _filled_session(world)
@@ -384,6 +434,34 @@ async def test_make_teams_reruns_a_session_awaiting_a_pick(world):
     refused = await world.run(world.admin_cog.make_teams, session_id=session.id)
     assert "already has teams" in refused.text
     assert world.owner_options_message() is second_dm
+    assert len(await world.matches(session.id)) == 1
+
+
+@flow
+async def test_make_teams_can_discard_picked_teams_and_start_over(world):
+    """Once an option was picked there was no way to pick again short of editing the database."""
+    players, session = await _filled_session(world)
+    await world.close(session.id)
+    picked_dm = world.owner_options_message()
+    await world.pick(0)
+    old = (await world.matches(session.id))[0]
+
+    ix = await world.run(world.admin_cog.make_teams, session_id=session.id, discard_teams=True)
+    assert "Re-ran the matchmaker" in ix.text and f"Discarded Match {old.id}" in ix.text
+    assert await world.matches(session.id) == []
+    assert (await world.session(session.id)).status == "matched"
+    new_dm = world.owner_options_message()
+    assert new_dm is not picked_dm
+
+    await world.pick(3, message=new_dm)
+    matches = await world.matches(session.id)
+    assert len(matches) == 1 and matches[0].id != old.id
+    assert len([t for t in world.recruit_channel.texts if "Teams finalized" in t]) == 2
+
+    # A reported result is never discarded.
+    await world.run(world.admin_cog.report_manual, series_score="2-0", match_id=matches[0].id)
+    refused = await world.run(world.admin_cog.make_teams, session_id=session.id, discard_teams=True)
+    assert "isn't open" in refused.text
     assert len(await world.matches(session.id)) == 1
 
 

@@ -10,8 +10,9 @@ import discord
 from sqlalchemy import select
 
 from bot.config import format_team_lines
-from bot.db.models import Match, ProposalSet, Session as InhouseSession
+from bot.db.models import Match, ProposalSet, Rating, Session as InhouseSession
 from bot.db.session import get_session
+from bot.services.elo import DEFAULT_ELO
 from bot.services.rosters import TEAM_NAMES
 
 log = logging.getLogger(__name__)
@@ -22,8 +23,9 @@ def _team_lines(
     by_role: dict[str, int],
     emoji: bool = True,
     name_map: dict[int, str] | None = None,
+    elo_map: dict[int, float] | None = None,
 ) -> str:
-    return format_team_lines(by_role, emoji=emoji, name_map=name_map)
+    return format_team_lines(by_role, emoji=emoji, name_map=name_map, elo_map=elo_map)
 
 
 # =============================================================================
@@ -137,6 +139,13 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
 
         session = await db.get(InhouseSession, ps.session_id)
 
+        # Each player's elo in the role they were given, for the public post.
+        elo_map: dict[int, float] = {}
+        for team in (chosen["team1"], chosen["team2"]):
+            for role, uid in team.items():
+                rating = await db.get(Rating, (int(uid), role))
+                elo_map[int(uid)] = rating.elo if rating else DEFAULT_ELO
+
     # Disable all buttons on the DM
     view = ProposalChoiceView(count=len(proposals_data))
     for child in view.children:
@@ -148,40 +157,63 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
     )
 
     # Post the chosen teams publicly
-    if session and session.recruit_channel_id:
-        channel = interaction.client.get_channel(session.recruit_channel_id)
-        if channel:
-            embed = discord.Embed(
-                title=f"🏆 Final Teams for Thursday {session.game_date.strftime('%b %d')}",
-                color=discord.Color.green(),
-            )
-            all_ids = list(chosen["team1"].values()) + list(chosen["team2"].values())
-            # The pick is clicked in a DM, so interaction.guild is None — resolve
-            # display names through the recruit channel's guild instead.
-            guild = getattr(channel, "guild", None)
-            name_map = {
-                uid: (m.display_name if guild and (m := guild.get_member(uid)) else str(uid))
-                for uid in all_ids
-            }
-            embed.add_field(name=f"🔵 {TEAM_NAMES[1]} (Blue)", value=_team_lines(chosen["team1"], name_map=name_map), inline=True)
-            embed.add_field(name=f"🔴 {TEAM_NAMES[2]} (Red)", value=_team_lines(chosen["team2"], name_map=name_map), inline=True)
-            lane = chosen.get("lane_diff")
-            balance_part = (
-                f"Lane diff: {lane:.0f} · Team diff: {chosen['balance_diff']:.0f}"
-                if lane is not None else f"Skill diff: {chosen['balance_diff']:.2f}"
-            )
-            embed.set_footer(
-                text=f"Match {match.id} · Session #{session.id} (Option {label}) · "
-                     f"{balance_part} · Game time: Thu 9:00 PM ET"
-            )
-            try:
-                await channel.send(content="🔒 Teams finalized:", embed=embed)
-                return
-            except discord.HTTPException:
-                log.exception("Failed to post final teams for session %s", session.id)
-    # Reached only when the public post didn't happen — the DM above already said
-    # "Posted", so correct it rather than leave the owner thinking teams went out.
-    await interaction.followup.send(
-        f"⚠️ Option {label} is saved as Match {match.id}, but I couldn't post the teams "
-        f"to the recruit channel. Share them with `/match-roster match_id:{match.id}`."
+    posted = False
+    channel = (
+        interaction.client.get_channel(session.recruit_channel_id)
+        if session and session.recruit_channel_id else None
     )
+    if channel:
+        embed = discord.Embed(
+            title=f"🏆 Final Teams for Thursday {session.game_date.strftime('%b %d')}",
+            color=discord.Color.green(),
+        )
+        all_ids = list(chosen["team1"].values()) + list(chosen["team2"].values())
+        # The pick is clicked in a DM, so interaction.guild is None — resolve
+        # display names through the recruit channel's guild instead.
+        guild = getattr(channel, "guild", None)
+        name_map = {
+            uid: (m.display_name if guild and (m := guild.get_member(uid)) else str(uid))
+            for uid in all_ids
+        }
+        embed.add_field(name=f"🔵 {TEAM_NAMES[1]} (Blue)", value=_team_lines(chosen["team1"], name_map=name_map, elo_map=elo_map), inline=True)
+        embed.add_field(name=f"🔴 {TEAM_NAMES[2]} (Red)", value=_team_lines(chosen["team2"], name_map=name_map, elo_map=elo_map), inline=True)
+        lane = chosen.get("lane_diff")
+        balance_part = (
+            f"Lane diff: {lane:.0f} · Team diff: {chosen['balance_diff']:.0f}"
+            if lane is not None else f"Skill diff: {chosen['balance_diff']:.2f}"
+        )
+        embed.set_footer(
+            text=f"Match {match.id} · Session #{session.id} (Option {label}) · "
+                 f"{balance_part} · Game time: Thu 9:00 PM ET"
+        )
+        try:
+            await channel.send(content="🔒 Teams finalized:", embed=embed)
+            posted = True
+        except discord.HTTPException:
+            log.exception("Failed to post final teams for session %s", session.id)
+    if not posted:
+        # The DM above already said "Posted", so correct it rather than leave the
+        # owner thinking teams went out.
+        await interaction.followup.send(
+            f"⚠️ Option {label} is saved as Match {match.id}, but I couldn't post the teams "
+            f"to the recruit channel. Share them with `/match-roster match_id:{match.id}`."
+        )
+
+    await interaction.followup.send(await _build_channels_for_pick(interaction, channel, match.id))
+
+
+async def _build_channels_for_pick(interaction: discord.Interaction, recruit_channel, match_id: int) -> str:
+    """Build the per-team roles + private channels for a match that was just
+    picked (what /match-channels does) and return the summary for the owner.
+    A failure here never undoes the pick: the match is already saved."""
+    retry = f"Run `/match-channels match_id:{match_id}` to build the team channels."
+    # The pick is clicked in a DM, so the guild comes from the recruit channel.
+    guild = getattr(recruit_channel, "guild", None)
+    admin_cog = interaction.client.get_cog("AdminCog")
+    if guild is None or admin_cog is None:
+        return f"⚠️ I couldn't reach the server to build the team channels. {retry}"
+    try:
+        return await admin_cog._build_match_channels(guild, guild.id, match_id)
+    except Exception:
+        log.exception("Building team channels for match %s failed", match_id)
+        return f"⚠️ Building the team channels failed partway. {retry}"

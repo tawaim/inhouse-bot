@@ -68,11 +68,14 @@ def format_team_lines(
     by_role: dict[str, int],
     emoji: bool = True,
     name_map: dict[int, str] | None = None,
+    elo_map: dict[int, float] | None = None,
 ) -> str:
     """Render a team roster top-down: TOP, JUN, MID, BOT, SUP.
 
     If name_map is provided, names are shown as plain text truncated to NAME_MAX
-    characters instead of Discord mentions.
+    characters instead of Discord mentions. If elo_map is provided, each player's
+    elo (the caller passes the one for the role they are seated in) follows
+    their name in brackets.
     """
     out = []
     for role in ROLES:
@@ -84,7 +87,8 @@ def format_team_lines(
             name = name_map.get(uid, str(uid))
             if len(name) > NAME_MAX:
                 name = name[:NAME_MAX - 1] + "…"
-            out.append(f"{prefix}**{ROLE_SHORT[role]}**: {name}")
         else:
-            out.append(f"{prefix}**{ROLE_SHORT[role]}**: <@{uid}>")
+            name = f"<@{uid}>"
+        elo = f" ({elo_map[uid]:.0f})" if elo_map is not None and uid in elo_map else ""
+        out.append(f"{prefix}**{ROLE_SHORT[role]}**: {name}{elo}")
     return "\n".join(out)

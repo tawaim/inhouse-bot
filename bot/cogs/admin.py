@@ -1223,8 +1223,15 @@ class AdminCog(commands.Cog):
         description="(admin) Close signups and DM the owner the top 10 team options. Run again to regenerate.",
     )
     @app_commands.describe(
-        session_id="Session ID. Defaults to the current open session, else the one awaiting a pick.")
-    async def make_teams(self, interaction: discord.Interaction, session_id: Optional[int] = None):
+        session_id="Session ID. Defaults to the current open session, else the one awaiting a pick.",
+        discard_teams="Also throw away teams already picked for this session (unreported only) and start over.",
+    )
+    async def make_teams(
+        self,
+        interaction: discord.Interaction,
+        session_id: Optional[int] = None,
+        discard_teams: bool = False,
+    ):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("League Admin only.", ephemeral=True)
             return
@@ -1249,22 +1256,36 @@ class AdminCog(commands.Cog):
                     "No open session to close. Pass `session_id:` to pick one.", ephemeral=True)
                 return
             sid, was_matched = session.id, session.status == "matched"
+            old_matches = [m.id for m in (await db.execute(
+                select(Match).where(Match.session_id == sid)
+            )).scalars().all()] if was_matched else []
 
         try:
-            outcome = await cog.close_signups_and_match(sid, rerun=True)
+            outcome = await cog.close_signups_and_match(sid, rerun=True, discard_teams=discard_teams)
         except Exception as e:
             log.exception("make-teams failed")
             await interaction.followup.send(f"❌ Failed: {e}", ephemeral=True)
             return
+        discarded = (
+            f" Discarded Match {', '.join(str(i) for i in old_matches)}; its teams post and any "
+            f"team channels are still up (`/clear-match-channels` removes the channels and roles)."
+            if old_matches else ""
+        )
         messages = {
             "matched": (
                 f"✅ Re-ran the matchmaker for Session #{sid}. The owner was DM'd new team "
-                f"options; the buttons on the earlier DM no longer work."
+                f"options; the buttons on the earlier DM no longer work.{discarded}"
                 if was_matched else
                 f"✅ Session #{sid} closed. The owner was DM'd the team options."
             ),
-            "has_teams": f"Session #{sid} already has teams picked, so I didn't re-run it. "
-                         f"Change the roster with `/manual-match session_id:{sid}`.",
+            "has_teams": (
+                f"Session #{sid} already has a reported result, so its teams can't be discarded. "
+                f"`/unreport` the match first."
+                if discard_teams else
+                f"Session #{sid} already has teams picked, so I didn't re-run it. To throw them "
+                f"away and pick again, run `/make-teams session_id:{sid} discard_teams:true`; "
+                f"to edit them, use `/manual-match session_id:{sid}`."
+            ),
             "dm_failed": f"⚠️ Session #{sid} closed and options were generated, but the owner DM "
                          f"failed. Fix DMs, then `/resend-options session_id:{sid}`.",
             "waiting": f"⏳ Session #{sid} can't be matched yet (not enough players, or roles "

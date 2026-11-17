@@ -81,7 +81,14 @@ def test_ratings_are_internally_consistent(tmp_path):
 
 
 def test_unreport_then_rereport_latest_match_is_lossless(tmp_path):
-    """Undoing and re-applying the newest reported series reproduces today's ratings."""
+    """Undoing and re-applying the newest reported series is stable: doing it
+    twice gives the same ratings both times, and nobody's game count or seed moves.
+
+    It is not compared with the ratings in the snapshot. A re-report scores the
+    series from the players' current seeds, so it only reproduces the original
+    numbers while no participant's seed has changed since the report (a rank sync
+    moved one after match 16, which shifted that lane's delta from 30 to 28).
+    """
     db = _copy(tmp_path)
 
     async def body():
@@ -103,12 +110,18 @@ def test_unreport_then_rereport_latest_match_is_lossless(tmp_path):
         async with get_session() as s:
             m = await s.get(Match, latest.id)
             games = await AdminCog._games_from_gamestats(None, s, m)
-        status, _, _ = await AdminCog._revert_result(None, latest.id)
-        assert status == "ok"
-        assert _dump(db)["ratings"] != before
-        await AdminCog._commit_games(None, latest.id, games, None, 1)
+        replays = []
+        for _ in range(2):
+            status, _, _ = await AdminCog._revert_result(None, latest.id)
+            assert status == "ok"
+            assert _dump(db)["ratings"] != before
+            await AdminCog._commit_games(None, latest.id, games, None, 1)
+            replays.append(_dump(db)["ratings"])
         await close_db()
-        return before
+        return before, replays
 
-    before = asyncio.run(body())
-    assert _dump(db)["ratings"] == before
+    before, (first, second) = asyncio.run(body())
+    assert first == second
+    # (discord_id, role, elo, base_seed, inhouse_modifier, games_played)
+    assert [(r[0], r[1], r[3], r[5]) for r in first] == [(r[0], r[1], r[3], r[5]) for r in before]
+    assert all(r[2] == r[3] + r[4] for r in first)

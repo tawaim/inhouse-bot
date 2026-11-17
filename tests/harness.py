@@ -132,6 +132,8 @@ class _Sendable:
 class FakeChannel(_Sendable, discord.TextChannel):
     """A guild text channel. Passes isinstance(x, discord.TextChannel)."""
 
+    category = None  # plain attribute (discord's is a read-only property)
+
     def __init__(self, name: str, guild: "FakeGuild"):  # noqa: super().__init__ deliberately skipped
         self.id = next(_ids)
         self.name = name
@@ -146,6 +148,28 @@ class FakeChannel(_Sendable, discord.TextChannel):
 
     async def delete(self, **kwargs):
         self.guild.channels.pop(self.id, None)
+
+
+class FakeCategory(discord.CategoryChannel):
+    """A channel category. Passes isinstance(x, discord.CategoryChannel)."""
+
+    def __init__(self, name: str, guild: "FakeGuild"):  # noqa: super().__init__ deliberately skipped
+        self.id = next(_ids)
+        self.name = name
+        self.guild = guild
+
+    @property
+    def text_channels(self):
+        return [c for c in self.guild.text_channels if getattr(c, "category", None) is self]
+
+
+class FakeRole:
+    """A guild role: hashable, so it can key a permission-overwrites dict."""
+
+    def __init__(self, name: str, id: Optional[int] = None):
+        self.id = id if id is not None else next(_ids)
+        self.name = name
+        self.mention = f"<@&{self.id}>"
 
 
 class FakeDM(_Sendable):
@@ -202,7 +226,7 @@ class FakeGuild:
         self.members: dict[int, FakeMember] = {}
         self.channels: dict[int, FakeChannel] = {}
         self.roles: list = []
-        self.default_role = types.SimpleNamespace(name="@everyone", id=GUILD_ID)
+        self.default_role = FakeRole("@everyone", GUILD_ID)
         self.me = FakeMember(999, "bot", self, bot=True)
         self.chunked = True  # the member cache is always complete here
 
@@ -223,7 +247,18 @@ class FakeGuild:
 
     @property
     def text_channels(self):
-        return list(self.channels.values())
+        return [c for c in self.channels.values() if isinstance(c, FakeChannel)]
+
+    async def create_role(self, name: str, **kwargs):
+        role = FakeRole(name)
+        self.roles.append(role)
+        return role
+
+    async def create_text_channel(self, name: str, category=None, **kwargs):
+        ch = FakeChannel(name, self)
+        ch.category = category
+        self.channels[ch.id] = ch
+        return ch
 
 
 class FakeBot:
@@ -494,6 +529,16 @@ class World:
         ch = FakeChannel(name, self.guild)
         self.guild.channels[ch.id] = ch
         return ch
+
+    async def add_match_category(self, name: str = "matches") -> FakeCategory:
+        """A category configured as the place team channels get created
+        (what /set-match-category does)."""
+        cat = FakeCategory(name, self.guild)
+        self.guild.channels[cat.id] = cat
+        async with get_session() as db:
+            (await db.get(GuildConfig, GUILD_ID)).match_category_id = cat.id
+            await db.commit()
+        return cat
 
     def add_member(self, id: int, name: str, roles: tuple[str, ...] = ()) -> FakeMember:
         m = FakeMember(id, name, self.guild, roles)

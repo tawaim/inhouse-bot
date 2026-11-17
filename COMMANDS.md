@@ -116,7 +116,7 @@ Closes signups for **one specific** recruitment — locks the RSVP buttons (stat
 
 Closes signups now and DMs the owner the top 10 team options, without waiting for the scheduled close. Works on a `recruiting` or `closed` session; defaults to the current one. The reply says what actually happened: options sent, owner DM failed, or not enough players yet.
 
-**Re-running:** run it again on a session that is waiting on a pick (options sent, none chosen) to generate the options afresh from the current signups and ratings. The earlier DM's buttons stop working, signups stay closed and nothing is posted in the recruit channel. With no `session_id` it takes an open session first, and otherwise the one awaiting a pick. Once an option has been picked it refuses; change the roster with `/manual-match` instead. To change who is playing before re-running, use `/reopen-signups`.
+**Re-running:** run it again on a session that is waiting on a pick (options sent, none chosen) to generate the options afresh from the current signups and ratings. The earlier DM's buttons stop working, signups stay closed and nothing is posted in the recruit channel. With no `session_id` it takes an open session first, and otherwise the one awaiting a pick. Once an option has been picked it refuses, unless you pass `discard_teams:true`: that deletes the picked match (only if no result has been reported for it) and sends fresh options so you can pick again. The old teams post and any team channels stay up; run `/clear-match-channels` first if channels were built for the discarded teams. To edit picked teams rather than redo them, use `/manual-match`. To change who is playing before re-running, use `/reopen-signups`.
 
 ### `/reopen-signups <session_id>` (admin)
 
@@ -393,7 +393,9 @@ When a recruitment reaches its signup close time (or `/make-teams` is run), you 
 
 There can be fewer than 10 when the signups don't allow that many options that differ by at least 2 player swaps.
 
-Click one → bot creates the Match record and posts the chosen teams publicly to the recruit channel. The match is then ready for `/report` once games finish.
+Click one → bot creates the Match record, posts the chosen teams publicly to the recruit channel (each player with their elo in the role they were given), and builds the per-team roles and private channels, the same as `/match-channels`. The DM tells you how the channel build went; with no category set (`/set-match-category`) the match is still saved and you are told to configure one. The match is then ready for `/report` once games finish.
+
+Roles left over from an earlier match are not cleared by the build: run `/clear-match-channels` after each week so last week's players don't keep access to this week's team channels.
 
 If you don't pick, the proposal sits there — no auto-pick. `/resend-options` sends it again. The buttons refuse to act if the options were replaced, the session was cancelled, or teams were already set by hand.
 

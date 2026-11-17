@@ -158,7 +158,19 @@ class RecruitmentCog(commands.Cog):
     def _today(self) -> date:
         return datetime.now(self.tz).date()
 
-    async def close_signups_and_match(self, session_id: int, rerun: bool = False) -> str:
+    @staticmethod
+    async def _picked_teams(db, session_id: int, discard: bool) -> tuple[list[Match], bool]:
+        """A session's matches, and whether they block a re-run: they do unless
+        `discard` is set and none of them has been reported."""
+        matches = list((await db.execute(
+            select(Match).where(Match.session_id == session_id)
+        )).scalars().all())
+        blocked = bool(matches) and (not discard or any(m.winner is not None for m in matches))
+        return matches, blocked
+
+    async def close_signups_and_match(
+        self, session_id: int, rerun: bool = False, discard_teams: bool = False,
+    ) -> str:
         """Close a session's signups and generate the team options. Safe to call
         repeatedly (the scheduler retries it). Returns what happened:
 
@@ -174,6 +186,10 @@ class RecruitmentCog(commands.Cog):
         With rerun=True a session that is already waiting on the owner's pick
         ("matched", no teams yet) is matched again from its current signups and
         ratings; the options sent before are voided. The scheduler never reruns.
+
+        With discard_teams=True as well, teams that were already picked for the
+        session are deleted once the new options exist, provided no result has
+        been reported for them.
         """
         open_states = ("recruiting", "closed", "matched") if rerun else ("recruiting", "closed")
         async with get_session() as db:
@@ -181,9 +197,8 @@ class RecruitmentCog(commands.Cog):
             if session is None or session.status not in open_states:
                 log.warning("Session %s is not open for matching", session_id)
                 return "not_open"
-            if session.status == "matched" and (await db.execute(
-                select(Match).where(Match.session_id == session_id)
-            )).scalars().first() is not None:
+            if session.status == "matched" and (
+                    await self._picked_teams(db, session_id, discard_teams))[1]:
                 return "has_teams"
             channel = self.bot.get_channel(session.recruit_channel_id)
             if channel is None:
@@ -214,10 +229,11 @@ class RecruitmentCog(commands.Cog):
             session = await db.get(InhouseSession, session_id)
             if session is None or session.status not in open_states:
                 return "not_open"  # changed while we were syncing ranks
-            if session.status == "matched" and (await db.execute(
-                select(Match).where(Match.session_id == session_id)
-            )).scalars().first() is not None:
-                return "has_teams"  # the owner picked while we were syncing ranks
+            picked: list[Match] = []
+            if session.status == "matched":
+                picked, blocked = await self._picked_teams(db, session_id, discard_teams)
+                if blocked:
+                    return "has_teams"  # e.g. the owner picked while we were syncing ranks
             playing_signups = (await db.execute(
                 select(Signup)
                 .where(Signup.session_id == session_id)
@@ -264,6 +280,17 @@ class RecruitmentCog(commands.Cog):
                     ProposalSet.session_id == session.id, ProposalSet.resolved_at.is_(None))
             )).scalars().all():
                 old.resolved_at = datetime.utcnow()
+
+            # discard_teams: the picked (unreported) teams go, in the same commit
+            # that saves their replacement options.
+            for m in picked:
+                for ps in (await db.execute(
+                    select(ProposalSet).where(ProposalSet.resolved_match_id == m.id)
+                )).scalars().all():
+                    ps.resolved_match_id = None
+                await db.flush()  # drop the references before the row they point at
+                log.info("Discarding unreported match %s of session %s", m.id, session_id)
+                await db.delete(m)
 
             proposal_set = ProposalSet(
                 session_id=session.id,
