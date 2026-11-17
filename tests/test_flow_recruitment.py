@@ -358,6 +358,50 @@ async def test_owner_gets_ten_options_and_can_pick_a_late_one(world):
 
 
 @flow
+async def test_make_teams_reruns_a_session_awaiting_a_pick(world):
+    """Re-running used to need /reopen-signups first: /make-teams said the session wasn't open."""
+    players, session = await _filled_session(world)
+    await world.run(world.admin_cog.make_teams)
+    first_dm = world.owner_options_message()
+    channel_before = list(world.recruit_channel.texts)
+
+    # The scheduler's path still leaves a session that is awaiting a pick alone.
+    assert await world.close(session.id) == "not_open"
+    assert world.owner_options_message() is first_dm
+
+    ix = await world.run(world.admin_cog.make_teams)          # no id: finds the matched session
+    assert "Re-ran the matchmaker" in ix.text
+    second_dm = world.owner_options_message()
+    assert second_dm is not first_dm
+    assert (await world.session(session.id)).status == "matched"
+    assert world.recruit_channel.texts == channel_before       # signups never re-opened publicly
+
+    assert "replaced by a newer set" in (await world.pick(0, message=first_dm)).text
+    await world.pick(0, message=second_dm)
+    assert len(await world.matches(session.id)) == 1
+
+    # Once an option is picked there is nothing to re-run.
+    refused = await world.run(world.admin_cog.make_teams, session_id=session.id)
+    assert "already has teams" in refused.text
+    assert world.owner_options_message() is second_dm
+    assert len(await world.matches(session.id)) == 1
+
+
+@flow
+async def test_make_teams_prefers_an_open_session_over_one_awaiting_a_pick(world):
+    players, session = await _filled_session(world)
+    await world.close(session.id)                               # this week: awaiting a pick
+    first_dm = world.owner_options_message()
+    others, next_session = await _filled_session(world, game_date=NEXT_THURSDAY, start_id=301)
+
+    ix = await world.run(world.admin_cog.make_teams)
+    assert f"Session #{next_session.id} closed" in ix.text
+    assert (await world.session(next_session.id)).status == "matched"
+    assert "replaced" not in (await world.pick(0, message=first_dm)).text   # this week's untouched
+    assert len(await world.matches(session.id)) == 1
+
+
+@flow
 async def test_make_teams_reports_what_actually_happened(world):
     """Used to say 'Check your DMs' even when nothing was sent."""
     players, session = await _filled_session(world, n=4)

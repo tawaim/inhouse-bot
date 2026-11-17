@@ -116,6 +116,8 @@ Closes signups for **one specific** recruitment — locks the RSVP buttons (stat
 
 Closes signups now and DMs the owner the top 10 team options, without waiting for the scheduled close. Works on a `recruiting` or `closed` session; defaults to the current one. The reply says what actually happened: options sent, owner DM failed, or not enough players yet.
 
+**Re-running:** run it again on a session that is waiting on a pick (options sent, none chosen) to generate the options afresh from the current signups and ratings. The earlier DM's buttons stop working, signups stay closed and nothing is posted in the recruit channel. With no `session_id` it takes an open session first, and otherwise the one awaiting a pick. Once an option has been picked it refuses; change the roster with `/manual-match` instead. To change who is playing before re-running, use `/reopen-signups`.
+
 ### `/reopen-signups <session_id>` (admin)
 
 Re-opens signups for a session that is `closed`, `cancelled`, or waiting on a team pick (`matched` with no teams chosen yet). Use it when someone drops out after the close, or a tenth player turns up late.

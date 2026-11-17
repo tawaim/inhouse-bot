@@ -158,7 +158,7 @@ class RecruitmentCog(commands.Cog):
     def _today(self) -> date:
         return datetime.now(self.tz).date()
 
-    async def close_signups_and_match(self, session_id: int) -> str:
+    async def close_signups_and_match(self, session_id: int, rerun: bool = False) -> str:
         """Close a session's signups and generate the team options. Safe to call
         repeatedly (the scheduler retries it). Returns what happened:
 
@@ -168,13 +168,23 @@ class RecruitmentCog(commands.Cog):
                         session is left as it was and a notice is posted (once
                         per distinct reason)
           "not_open"    session missing, or not recruiting/closed
+          "has_teams"   (rerun only) an option was already picked; nothing changed
           "no_channel"  recruit channel unreachable right now; nothing changed
+
+        With rerun=True a session that is already waiting on the owner's pick
+        ("matched", no teams yet) is matched again from its current signups and
+        ratings; the options sent before are voided. The scheduler never reruns.
         """
+        open_states = ("recruiting", "closed", "matched") if rerun else ("recruiting", "closed")
         async with get_session() as db:
             session = await db.get(InhouseSession, session_id)
-            if session is None or session.status not in ("recruiting", "closed"):
+            if session is None or session.status not in open_states:
                 log.warning("Session %s is not open for matching", session_id)
                 return "not_open"
+            if session.status == "matched" and (await db.execute(
+                select(Match).where(Match.session_id == session_id)
+            )).scalars().first() is not None:
+                return "has_teams"
             channel = self.bot.get_channel(session.recruit_channel_id)
             if channel is None:
                 log.error("Recruit channel %s not reachable; will retry", session.recruit_channel_id)
@@ -202,8 +212,12 @@ class RecruitmentCog(commands.Cog):
 
         async with get_session() as db:
             session = await db.get(InhouseSession, session_id)
-            if session is None or session.status not in ("recruiting", "closed"):
+            if session is None or session.status not in open_states:
                 return "not_open"  # changed while we were syncing ranks
+            if session.status == "matched" and (await db.execute(
+                select(Match).where(Match.session_id == session_id)
+            )).scalars().first() is not None:
+                return "has_teams"  # the owner picked while we were syncing ranks
             playing_signups = (await db.execute(
                 select(Signup)
                 .where(Signup.session_id == session_id)

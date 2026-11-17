@@ -1220,10 +1220,11 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(
         name="make-teams",
-        description="(admin) Close signups now and DM the owner the top 10 team options.",
+        description="(admin) Close signups and DM the owner the top 10 team options. Run again to regenerate.",
     )
-    @app_commands.describe(session_id="Session ID. Defaults to the current open session.")
-    async def make_teams(self,interaction: discord.Interaction, session_id: Optional[int] = None):
+    @app_commands.describe(
+        session_id="Session ID. Defaults to the current open session, else the one awaiting a pick.")
+    async def make_teams(self, interaction: discord.Interaction, session_id: Optional[int] = None):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("League Admin only.", ephemeral=True)
             return
@@ -1238,21 +1239,32 @@ class AdminCog(commands.Cog):
             if session_id is not None:
                 session = await db.get(InhouseSession, session_id)
             else:
-                session = await find_current_session(db, ("recruiting", "closed"), cog._today())
+                # An open session first; otherwise re-run the one awaiting a pick.
+                session = (
+                    await find_current_session(db, ("recruiting", "closed"), cog._today())
+                    or await find_current_session(db, ("matched",), cog._today())
+                )
             if session is None:
                 await interaction.followup.send(
                     "No open session to close. Pass `session_id:` to pick one.", ephemeral=True)
                 return
-            sid = session.id
+            sid, was_matched = session.id, session.status == "matched"
 
         try:
-            outcome = await cog.close_signups_and_match(sid)
+            outcome = await cog.close_signups_and_match(sid, rerun=True)
         except Exception as e:
             log.exception("make-teams failed")
             await interaction.followup.send(f"❌ Failed: {e}", ephemeral=True)
             return
         messages = {
-            "matched": f"✅ Session #{sid} closed. The owner was DM'd the team options.",
+            "matched": (
+                f"✅ Re-ran the matchmaker for Session #{sid}. The owner was DM'd new team "
+                f"options; the buttons on the earlier DM no longer work."
+                if was_matched else
+                f"✅ Session #{sid} closed. The owner was DM'd the team options."
+            ),
+            "has_teams": f"Session #{sid} already has teams picked, so I didn't re-run it. "
+                         f"Change the roster with `/manual-match session_id:{sid}`.",
             "dm_failed": f"⚠️ Session #{sid} closed and options were generated, but the owner DM "
                          f"failed. Fix DMs, then `/resend-options session_id:{sid}`.",
             "waiting": f"⏳ Session #{sid} can't be matched yet (not enough players, or roles "
