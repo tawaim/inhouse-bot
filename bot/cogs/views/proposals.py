@@ -162,7 +162,7 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
         child.disabled = True
     label = chr(ord("A") + choice_index)
     await interaction.response.edit_message(
-        content=f"✅ Committed Option {label}. Posted to the recruit channel.",
+        content=f"✅ Committed Option {label} as Match {match.id}. Posted to the recruit channel.",
         view=view,
     )
 
@@ -192,10 +192,8 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
             f"Lane diff: {lane:.0f} · Team diff: {chosen['balance_diff']:.0f}"
             if lane is not None else f"Skill diff: {chosen['balance_diff']:.2f}"
         )
-        embed.set_footer(
-            text=f"Match {match.id} · Session #{session.id} (Option {label}) · "
-                 f"{balance_part} · Game time: Thu 9:00 PM ET\n{ELO_KEY}"
-        )
+        # Just the balance line and the key: the match id goes to the owner in the DM.
+        embed.set_footer(text=f"{balance_part}\n{ELO_KEY}")
         try:
             await channel.send(content="🔒 Teams finalized:", embed=embed)
             posted = True

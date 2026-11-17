@@ -152,7 +152,7 @@ Lists everyone who signed up for a session and **the role(s) each playing player
 
 Ephemeral, so it doesn't leak role picks publicly. Defaults to the soonest active recruiting session; pass `session_id` (shown on the recruitment post footer as `Session #N`) to view a specific one.
 
-> **Reference IDs:** every night's messages carry a `Session #N` (recruitment post, signups-closed notice, teams post); match/result messages carry `Match #M`. Use the **session id** for session-scoped commands (`/signups`, `/manual-match`, `/report-manual`) and the **match id** for match-scoped ones (`/report`, `/match-roster`, `/unreport`). You never have to type a date.
+> **Reference IDs:** every night's messages carry a `Session #N` (recruitment post, signups-closed notice, teams post); match/result messages carry `Match #M`. Use the **session id** for session-scoped commands (`/signups`, `/manual-match`, `/report-manual`) and the **match id** for match-scoped ones (`/report`, `/match-roster`, `/unreport`). You never have to type a date. The final teams post made when you pick an option carries no ids (its footer is just the lane/team diff and the elo key): the match id is in the pick confirmation in your DM, and `/matches` lists it too.
 
 ### `/cancel-session [session_id]` (admin)
 
@@ -319,7 +319,7 @@ Refreshes every linked player's base seed from their current solo queue rank. Th
 Report a series from end-of-game screenshots, one per game (PNG/JPEG/GIF/WebP, up to 5 MB each).
 
 **Arguments:**
-- `match_id` — The match number from the teams post (shown in the embed footer)
+- `match_id` — The match number: from the pick confirmation in your DM, the `/manual-match` teams post footer, or `/matches`
 - `game1`, `game2`, `game3` — one scoreboard screenshot per game played
 
 **Flow:**

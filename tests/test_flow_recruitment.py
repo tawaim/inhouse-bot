@@ -3,6 +3,7 @@
 Each test names the failure it guards against.
 """
 import json
+import re
 from datetime import date, datetime, timedelta
 
 from bot.services.scheduler import run_due_closes
@@ -435,10 +436,17 @@ async def test_final_teams_post_shows_each_players_elo_in_their_role(world):
             (await db.get(Rating, (p.id, "INHOUSE"))).elo += 500
         await db.commit()
     await world.close(session.id)
-    await world.pick(0)
+    picked = await world.pick(2)
     final = next(t for t in world.recruit_channel.texts if "Teams finalized" in t)
-    assert final.rstrip().endswith("Key: name - role elo (INHOUSE elo)")   # the key, at the bottom
     match = (await world.matches(session.id))[0]
+    # The footer is the balance line, then the key, and nothing else (it used to
+    # carry the match id, session id, which option was picked and the game time).
+    post = next(m for m in world.recruit_channel.sent if "Teams finalized" in m.text)
+    balance, key = post.embeds[0].footer.text.split("\n")
+    assert re.fullmatch(r"Lane diff: \d+ · Team diff: \d+", balance)
+    assert key == "Key: name - role elo (INHOUSE elo)"
+    assert "Option" not in final
+    assert f"as Match {match.id}" in picked.text           # the owner still gets the match id
     ratings = await world.ratings()
     seated = {**json.loads(match.team1_json), **{f"2{r}": u for r, u in json.loads(match.team2_json).items()}}
     assert len(seated) == 10
