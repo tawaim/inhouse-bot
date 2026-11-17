@@ -7,9 +7,9 @@ import logging
 from datetime import datetime
 
 import discord
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from bot.config import ELO_KEY, format_team_lines
+from bot.config import ELO_KEY, SEASON_NUMBER, format_team_lines
 from bot.db.models import Match, ProposalSet, Rating, Session as InhouseSession
 from bot.db.session import get_session
 from bot.services.elo import DEFAULT_ELO, INHOUSE_ROLE
@@ -145,6 +145,12 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
 
         session = await db.get(InhouseSession, ps.session_id)
 
+        # This series' number in the season: one more than the series played so
+        # far (reported ones; match ids skip deleted and never-played matches).
+        season_match = 1 + (await db.execute(
+            select(func.count()).select_from(Match).where(Match.winner.isnot(None))
+        )).scalar_one()
+
         # Each player's elo in the role they were given, and their INHOUSE elo,
         # for the public post.
         elo_map: dict[int, float] = {}
@@ -174,7 +180,8 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
     )
     if channel:
         embed = discord.Embed(
-            title=f"🏆 Final Teams for Thursday {session.game_date.strftime('%b %d')}",
+            title=(f"🏆 Final Teams for Thursday {session.game_date.strftime('%b %d')}"
+                   f" · Season {SEASON_NUMBER} - Series {season_match}"),
             color=discord.Color.green(),
         )
         all_ids = list(chosen["team1"].values()) + list(chosen["team2"].values())
@@ -192,7 +199,9 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
             f"Lane diff: {lane:.0f} · Team diff: {chosen['balance_diff']:.0f}"
             if lane is not None else f"Skill diff: {chosen['balance_diff']:.2f}"
         )
-        # Just the balance line and the key: the match id goes to the owner in the DM.
+        # The footer is the diffs, then the key. The season's series number is
+        # in the title; the match id (what the commands take) goes to the owner
+        # in the DM instead.
         embed.set_footer(text=f"{balance_part}\n{ELO_KEY}")
         try:
             await channel.send(content="🔒 Teams finalized:", embed=embed)

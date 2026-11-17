@@ -62,6 +62,9 @@ ROLES = ["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]  # ordered, no FILL
 
 ROLE_SHORT = {"TOP": "TOP", "JUNGLE": "JUN", "MID": "MID", "BOT": "BOT", "SUPPORT": "SUP"}
 NAME_MAX = 14
+# The season shown on the final teams post ("Season 1 - Series 17"). Bump it by hand
+# when a new season starts.
+SEASON_NUMBER = 1
 # The key for rosters rendered with both elo maps (see format_team_lines).
 ELO_KEY = "Key: name - role elo (INHOUSE elo)"
 

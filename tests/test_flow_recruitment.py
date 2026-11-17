@@ -435,13 +435,21 @@ async def test_final_teams_post_shows_each_players_elo_in_their_role(world):
                 (await db.get(Rating, (p.id, role))).elo += bump
             (await db.get(Rating, (p.id, "INHOUSE"))).elo += 500
         await db.commit()
+    # One series already played this season, and one match that never was: the
+    # pick below is the season's second series whatever its match id is.
+    played = await world.add_match(players[:5], players[5:])
+    await world.run(world.admin_cog.report_manual, series_score="2-0", match_id=played)
+    await world.add_match(players[:5], players[5:])
     await world.close(session.id)
     picked = await world.pick(2)
     final = next(t for t in world.recruit_channel.texts if "Teams finalized" in t)
     match = (await world.matches(session.id))[0]
-    # The footer is the balance line, then the key, and nothing else (it used to
-    # carry the match id, session id, which option was picked and the game time).
+    assert match.id == 3
+    # The season's series number follows the date in the title. The footer is
+    # the diffs, then the key, and nothing else (it used to carry the match id,
+    # session id, which option was picked and the game time).
     post = next(m for m in world.recruit_channel.sent if "Teams finalized" in m.text)
+    assert post.embeds[0].title == "🏆 Final Teams for Thursday May 16 · Season 1 - Series 2"
     balance, key = post.embeds[0].footer.text.split("\n")
     assert re.fullmatch(r"Lane diff: \d+ · Team diff: \d+", balance)
     assert key == "Key: name - role elo (INHOUSE elo)"
