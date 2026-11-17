@@ -180,8 +180,8 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
     )
     if channel:
         embed = discord.Embed(
-            title=(f"🏆 Final Teams for Thursday {session.game_date.strftime('%b %d')}"
-                   f" · Season {SEASON_NUMBER} - Series {season_match}"),
+            title=f"🏆 Final Teams for Thursday {session.game_date.strftime('%b %d')}",
+            description=f"Season {SEASON_NUMBER} - Series {season_match}",
             color=discord.Color.green(),
         )
         all_ids = list(chosen["team1"].values()) + list(chosen["team2"].values())
@@ -200,7 +200,7 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
             if lane is not None else f"Skill diff: {chosen['balance_diff']:.2f}"
         )
         # The footer is the diffs, then the key. The season's series number is
-        # in the title; the match id (what the commands take) goes to the owner
+        # on its own line under the title; the match id (what the commands take) goes to the owner
         # in the DM instead.
         embed.set_footer(text=f"{balance_part}\n{ELO_KEY}")
         try:
