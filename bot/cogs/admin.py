@@ -1216,12 +1216,14 @@ class AdminCog(commands.Cog):
             ephemeral=True,
         )
 
+    # ========== Matchmaking ==========
+
     @app_commands.command(
-        name="test-trigger-close",
+        name="make-teams",
         description="(admin) Close signups now and DM the owner the 3 team options.",
     )
     @app_commands.describe(session_id="Session ID. Defaults to the current open session.")
-    async def test_trigger_close(self, interaction: discord.Interaction, session_id: Optional[int] = None):
+    async def make_teams(self,interaction: discord.Interaction, session_id: Optional[int] = None):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("League Admin only.", ephemeral=True)
             return
@@ -1246,7 +1248,7 @@ class AdminCog(commands.Cog):
         try:
             outcome = await cog.close_signups_and_match(sid)
         except Exception as e:
-            log.exception("test-trigger-close failed")
+            log.exception("make-teams failed")
             await interaction.followup.send(f"❌ Failed: {e}", ephemeral=True)
             return
         messages = {

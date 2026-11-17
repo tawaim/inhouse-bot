@@ -99,7 +99,7 @@ async def test_stale_open_session_expires_and_is_not_the_default(world):
 
     # A week later the old session is past its date: it is never the default target...
     world.recruitment._today = lambda: date(2030, 5, 20)
-    ix = await world.run(world.admin_cog.test_trigger_close)
+    ix = await world.run(world.admin_cog.make_teams)
     assert f"Session #{current.id} closed" in ix.text
     assert (await world.session(old.id)).status == "recruiting"
 
@@ -303,7 +303,7 @@ async def test_reopen_after_dropout_and_rematch(world):
 
     drop =await world.rsvp(session.id, players[0], "not_playing")
     assert "Recorded" in drop.text
-    done = await world.run(world.admin_cog.test_trigger_close, session_id=session.id)
+    done = await world.run(world.admin_cog.make_teams, session_id=session.id)
     assert "closed" in done.text
     await world.pick(0)
     m = (await world.matches(session.id))[0]
@@ -321,23 +321,23 @@ async def test_reopen_refused_once_teams_exist(world):
 
 
 @flow
-async def test_close_signups_then_trigger_close_matches(world):
+async def test_close_signups_then_make_teams_matches(world):
     """/close-signups led to a 'closed' state that the matchmaker couldn't see."""
     players, session = await _filled_session(world)
     await world.run(world.recruitment.close_signups, session_id=session.id)
     assert (await world.session(session.id)).status == "closed"
     refused = await world.signup(session.id, (await world.add_players(1, start_id=201))[0])
     assert "closed" in refused.text
-    ix = await world.run(world.admin_cog.test_trigger_close)
+    ix = await world.run(world.admin_cog.make_teams)
     assert "DM'd the 3 options" in ix.text
     assert (await world.session(session.id)).status == "matched"
 
 
 @flow
-async def test_trigger_close_reports_what_actually_happened(world):
+async def test_make_teams_reports_what_actually_happened(world):
     """Used to say 'Check your DMs' even when nothing was sent."""
     players, session = await _filled_session(world, n=4)
-    ix = await world.run(world.admin_cog.test_trigger_close)
+    ix = await world.run(world.admin_cog.make_teams)
     assert "can't be matched yet" in ix.text
     assert world.owner_options_message() is None
 

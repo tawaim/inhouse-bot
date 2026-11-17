@@ -110,14 +110,18 @@ Closes signups for **one specific** recruitment — locks the RSVP buttons (stat
 - Pass `session_id` to close that exact recruitment.
 - With no id: closes the open one if there's exactly one; if several are open, it **refuses and lists them** so you pick the right one (it never closes more than the one you mean).
 - Mainly for `open_ended` recruitments, but also works to close a scheduled one early.
-- To have the bot build teams from a closed session, run `/test-trigger-close session_id:<N>`.
+- To have the bot build teams from a closed session, run `/make-teams session_id:<N>`.
+
+### `/make-teams [session_id]` (admin)
+
+Closes signups now and DMs the owner the three options, without waiting for the scheduled close. Works on a `recruiting` or `closed` session; defaults to the current one. The reply says what actually happened: options sent, owner DM failed, or not enough players yet.
 
 ### `/reopen-signups <session_id>` (admin)
 
 Re-opens signups for a session that is `closed`, `cancelled`, or waiting on a team pick (`matched` with no teams chosen yet). Use it when someone drops out after the close, or a tenth player turns up late.
 
 - Any unanswered team options are voided (the old DM buttons will say so).
-- The session no longer auto-closes. Once the list is right, run `/test-trigger-close session_id:<N>` to generate new options.
+- The session no longer auto-closes. Once the list is right, run `/make-teams session_id:<N>` to generate new options.
 - Refused once teams exist for the session; edit the roster with `/manual-match` instead.
 
 ### `/resend-options [session_id]` (admin)
@@ -367,11 +371,6 @@ Fills the active recruiting session with fake players.
 The fakes get realistic-looking ranks (Bronze through Diamond) and a mix of role preferences (specialists + Fills) so the matchmaker can produce valid teams.
 
 **Important:** these are not real Discord users — their `discord_id` values are 1, 2, 3, ..., which won't collide with real IDs. They show up in `<@1>` mentions as "Unknown User" since Discord can't resolve them. That's fine for testing the matchmaker math; you just won't see nice names.
-
-### `/test-trigger-close [session_id]`
-
-Closes signups now and DMs the owner the three options, without waiting for the scheduled close. Works on a `recruiting` or `closed` session; defaults to the current one. The reply says what actually happened: options sent, owner DM failed, or not enough players yet.
-
 ---
 
 ## Owner-only DM interactions
@@ -386,7 +385,7 @@ When someone runs `/link`, you get a DM with the request and two buttons:
 
 ### Match option choice (DM)
 
-When a recruitment reaches its signup close time (or `/test-trigger-close` is run), you get a DM with the top-3 proposals:
+When a recruitment reaches its signup close time (or `/make-teams` is run), you get a DM with the top-3 proposals:
 - **Pick Option A** (green)
 - **Pick Option B** (blue)
 - **Pick Option C** (gray)

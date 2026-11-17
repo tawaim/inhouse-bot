@@ -935,7 +935,7 @@ class RecruitmentCog(commands.Cog):
         if status != "matched" or ps is None:
             await interaction.followup.send(
                 f"Session #{sid} has no pending options (status: {status}). "
-                f"Generate them with `/test-trigger-close session_id:{sid}`.",
+                f"Generate them with `/make-teams session_id:{sid}`.",
                 ephemeral=True,
             )
             return
@@ -1000,7 +1000,7 @@ class RecruitmentCog(commands.Cog):
                 log.exception("Failed to post reopen notice")
         await interaction.followup.send(
             f"✅ Re-opened Session #{session_id} (was {prev}). It won't auto-close: when the list "
-            f"is right, run `/test-trigger-close session_id:{session_id}` to make teams.",
+            f"is right, run `/make-teams session_id:{session_id}` to make teams.",
             ephemeral=True,
         )
 
