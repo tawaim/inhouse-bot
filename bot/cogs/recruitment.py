@@ -35,7 +35,9 @@ from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import select
 
-from bot.cogs.views.proposals import ProposalChoiceView, _team_lines
+from bot.cogs.views.proposals import (
+    OPTION_COUNT, ProposalChoiceView, _team_lines, option_color, option_label,
+)
 from bot.cogs.views.rsvp import RsvpView, _build_public_embed, _refresh_public_counts
 from bot.config import Config, ROLES
 from bot.db.models import GuildConfig, Match, Player, ProposalSet, Rating, Session as InhouseSession, Signup
@@ -232,7 +234,7 @@ class RecruitmentCog(commands.Cog):
                     ratings=ratings_dict,
                 ))
 
-            proposals = make_top_matches(player_inputs, n=3, min_diff=2)
+            proposals = make_top_matches(player_inputs, n=OPTION_COUNT, min_diff=2)
             if not proposals:
                 await self._hold_open(db, session, channel, f"coverage:{len(playing_signups)}", (
                     f"⚠️ {len(playing_signups)} signed up for "
@@ -311,11 +313,10 @@ class RecruitmentCog(commands.Cog):
             await self._warn_owner_dm_failed(session_id)
             return False
 
-        colors = [discord.Color.green(), discord.Color.blue(), discord.Color.purple()]
+        proposals = proposals[:OPTION_COUNT]
         embeds = []
-        for i, proposal in enumerate(proposals[:3]):
-            label = chr(ord("A") + i)  # A, B, C
-            embed = discord.Embed(title=f"Option {label}", color=colors[i])
+        for i, proposal in enumerate(proposals):
+            embed = discord.Embed(title=f"Option {option_label(i)}", color=option_color(i))
             team1 = {role: int(uid) for role, uid in proposal["team1"].items()}
             team2 = {role: int(uid) for role, uid in proposal["team2"].items()}
             embed.add_field(name=f"🔵 {TEAM_NAMES[1]}", value=_team_lines(team1), inline=True)
@@ -327,20 +328,19 @@ class RecruitmentCog(commands.Cog):
             ))
             embeds.append(embed)
 
-        intro = discord.Embed(
-            title=f"📊 Match options for Thursday {session.game_date.strftime('%b %d, %Y')}",
-            description=(
-                f"Three balanced options below, ranked by quality "
-                f"(Option A is the most balanced).\n\n"
-                f"Click a button to commit that option to the inhouse for elo tracking. "
-                f"The chosen teams will be posted publicly to the recruit channel."
-            ),
-            color=discord.Color.gold(),
+        # Plain text, not an embed: Discord allows 10 embeds per message and the
+        # options can use all of them.
+        intro = (
+            f"📊 **Match options for Thursday {session.game_date.strftime('%b %d, %Y')}**\n"
+            f"{len(proposals)} balanced option{'s' if len(proposals) != 1 else ''} below, "
+            f"ranked by quality (Option A is the most balanced).\n\n"
+            f"Click a button to commit that option to the inhouse for elo tracking. "
+            f"The chosen teams will be posted publicly to the recruit channel."
         )
 
         view = ProposalChoiceView(proposal_set_id, len(proposals))
         try:
-            msg = await owner.send(embeds=[intro] + embeds, view=view)
+            msg = await owner.send(content=intro, embeds=embeds, view=view)
         except (discord.Forbidden, discord.HTTPException) as e:
             log.error("Could not DM owner: %s", e)
             await self._warn_owner_dm_failed(session_id)
@@ -467,7 +467,7 @@ class RecruitmentCog(commands.Cog):
     @app_commands.command(name="match-preview", description="(admin) Show what teams would be generated right now.")
     @app_commands.describe(
         session_id="Session ID (from the recruitment footer). Defaults to the soonest active session.",
-        show_all="List every no-off-role team comp (most even lanes first) instead of just the top 3.",
+        show_all="List every no-off-role team comp (most even lanes first) instead of just the top 10.",
     )
     async def match_preview(
         self,
@@ -527,17 +527,16 @@ class RecruitmentCog(commands.Cog):
             await self._send_all_comps(interaction, session.id, player_inputs)
             return
 
-        proposals = make_top_matches(player_inputs, n=3, min_diff=2)
+        proposals = make_top_matches(player_inputs, n=OPTION_COUNT, min_diff=2)
         if not proposals:
             await interaction.followup.send("No valid matchup possible with current signups.", ephemeral=True)
             return
 
         embeds = []
         for i, proposal in enumerate(proposals):
-            label = chr(ord("A") + i)
             embed = discord.Embed(
-                title=f"Preview — Option {label}",
-                color=[discord.Color.green(), discord.Color.blue(), discord.Color.purple()][i],
+                title=f"Preview — Option {option_label(i)}",
+                color=option_color(i),
             )
             embed.add_field(name=TEAM_NAMES[1], value=_team_lines(proposal.team1.by_role, emoji=False), inline=True)
             embed.add_field(name=TEAM_NAMES[2], value=_team_lines(proposal.team2.by_role, emoji=False), inline=True)
@@ -903,7 +902,7 @@ class RecruitmentCog(commands.Cog):
 
     @app_commands.command(
         name="resend-options",
-        description="(admin) Re-send the three team options to the owner's DMs.",
+        description="(admin) Re-send the team options to the owner's DMs.",
     )
     @app_commands.describe(session_id="Session ID. Defaults to the current session awaiting a pick.")
     async def resend_options(self, interaction: discord.Interaction, session_id: Optional[int] = None):

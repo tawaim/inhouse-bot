@@ -617,7 +617,7 @@ class World:
             return await db.get(Player, discord_id)
 
     async def pick(self, index: int, message: Optional[FakeMessage] = None) -> FakeInteraction:
-        """Owner clicks Pick Option A/B/C in their DM (guild is None there)."""
+        """Owner clicks a Pick button (0 = A) in their DM (guild is None there)."""
         from bot.cogs.recruitment import _handle_proposal_pick
 
         msg = message or self.owner_options_message()

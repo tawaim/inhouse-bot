@@ -2,6 +2,7 @@
 
 Each test names the failure it guards against.
 """
+import json
 from datetime import date, datetime, timedelta
 
 from bot.services.scheduler import run_due_closes
@@ -329,8 +330,30 @@ async def test_close_signups_then_make_teams_matches(world):
     refused = await world.signup(session.id, (await world.add_players(1, start_id=201))[0])
     assert "closed" in refused.text
     ix = await world.run(world.admin_cog.make_teams)
-    assert "DM'd the 3 options" in ix.text
+    assert "DM'd the team options" in ix.text
     assert (await world.session(session.id)).status == "matched"
+
+
+@flow
+async def test_owner_gets_ten_options_and_can_pick_a_late_one(world):
+    """The owner DM used to stop at three options (A/B/C)."""
+    players, session = await _filled_session(world)
+    assert await world.close(session.id) == "matched"
+    dm = world.owner_options_message()
+    assert len(dm.embeds) == 10                     # Discord's per-message embed limit
+    assert [e.title for e in dm.embeds] == [f"Option {c}" for c in "ABCDEFGHIJ"]
+    assert [b.label for b in dm.view.children] == [f"Pick {c}" for c in "ABCDEFGHIJ"]
+    assert len({b.custom_id for b in dm.view.children}) == 10
+    assert all(b.row == i // 5 for i, b in enumerate(dm.view.children))   # 5 buttons per row max
+    assert sum(len(e) for e in dm.embeds) <= 6000   # Discord's per-message embed text limit
+
+    wanted = dm.embeds[9]
+    done = await world.pick(9)
+    assert "Committed Option J" in done.text
+    match = (await world.matches(session.id))[0]
+    for field, saved in zip(wanted.fields, (match.team1_json, match.team2_json)):
+        for uid in json.loads(saved).values():
+            assert f"<@{uid}>" in field.value
 
 
 @flow

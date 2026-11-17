@@ -1,4 +1,4 @@
-"""The owner's team-option DM: the A/B/C buttons, and committing the picked
+"""The owner's team-option DM: the pick buttons, and committing the picked
 option as the session's match."""
 from __future__ import annotations
 
@@ -27,30 +27,52 @@ def _team_lines(
 
 
 # =============================================================================
-# Owner choice view (for picking among top-3 match options)
+# Owner choice view (for picking among the top match options)
 # =============================================================================
 
+# How many team options the matchmaker offers the owner. Ten is the most that
+# fits one DM: Discord allows 10 embeds per message (one per option).
+OPTION_COUNT = 10
+
+
+def option_label(index: int) -> str:
+    """0 -> 'A', 1 -> 'B', ..."""
+    return chr(ord("A") + index)
+
+
+def option_color(index: int) -> discord.Color:
+    """Embed colour for an option: the first three keep their old colours."""
+    first = [discord.Color.green(), discord.Color.blue(), discord.Color.purple()]
+    return first[index] if index < len(first) else discord.Color.light_grey()
+
+
+class _PickButton(discord.ui.Button):
+    def __init__(self, index: int):
+        super().__init__(
+            label=f"Pick {option_label(index)}",
+            style=discord.ButtonStyle.success if index == 0 else discord.ButtonStyle.secondary,
+            # a/b/c match the IDs on option DMs sent before there were ten.
+            custom_id=f"proposal_pick_{option_label(index).lower()}",
+            row=index // 5,
+        )
+        self.index = index
+
+    async def callback(self, interaction: discord.Interaction):
+        await _handle_proposal_pick(interaction, self.index)
+
+
 class ProposalChoiceView(discord.ui.View):
-    """Persistent view DM'd to the owner with 3 buttons (A/B/C).
+    """Persistent view DM'd to the owner with one button per option (A, B, ...).
     Custom IDs are stable across restarts. The handlers re-fetch state from DB.
+
+    With no arguments it carries all OPTION_COUNT buttons, which is what the
+    post-restart re-registration needs.
     """
 
-    def __init__(self, proposal_set_id: int = 0, count: int = 3):
+    def __init__(self, proposal_set_id: int = 0, count: int = OPTION_COUNT):
         super().__init__(timeout=None)
-        # We always render up to 3 buttons; we'll disable extras if count<3
-        # The placeholder (proposal_set_id=0) is the post-restart re-registration
-
-    @discord.ui.button(label="Pick Option A", style=discord.ButtonStyle.success, custom_id="proposal_pick_a")
-    async def pick_a(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _handle_proposal_pick(interaction, 0)
-
-    @discord.ui.button(label="Pick Option B", style=discord.ButtonStyle.primary, custom_id="proposal_pick_b")
-    async def pick_b(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _handle_proposal_pick(interaction, 1)
-
-    @discord.ui.button(label="Pick Option C", style=discord.ButtonStyle.secondary, custom_id="proposal_pick_c")
-    async def pick_c(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await _handle_proposal_pick(interaction, 2)
+        for i in range(min(count, OPTION_COUNT)):
+            self.add_item(_PickButton(i))
 
 
 async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: int) -> None:
@@ -116,7 +138,7 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
         session = await db.get(InhouseSession, ps.session_id)
 
     # Disable all buttons on the DM
-    view = ProposalChoiceView()
+    view = ProposalChoiceView(count=len(proposals_data))
     for child in view.children:
         child.disabled = True
     label = chr(ord("A") + choice_index)

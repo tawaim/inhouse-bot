@@ -1211,7 +1211,7 @@ class AdminCog(commands.Cog):
         await interaction.followup.send(
             f"✅ Created {count} fake playing signups for session {session.id}.\n\n"
             f"{summary}\n\n"
-            f"Next: run `/match-preview` to see the top-3 proposals, or wait for "
+            f"Next: run `/match-preview` to see the top proposals, or wait for "
             f"the Monday 9:30 PM scheduler to fire.",
             ephemeral=True,
         )
@@ -1220,7 +1220,7 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(
         name="make-teams",
-        description="(admin) Close signups now and DM the owner the 3 team options.",
+        description="(admin) Close signups now and DM the owner the top 10 team options.",
     )
     @app_commands.describe(session_id="Session ID. Defaults to the current open session.")
     async def make_teams(self,interaction: discord.Interaction, session_id: Optional[int] = None):
@@ -1252,7 +1252,7 @@ class AdminCog(commands.Cog):
             await interaction.followup.send(f"❌ Failed: {e}", ephemeral=True)
             return
         messages = {
-            "matched": f"✅ Session #{sid} closed. The owner was DM'd the 3 options.",
+            "matched": f"✅ Session #{sid} closed. The owner was DM'd the team options.",
             "dm_failed": f"⚠️ Session #{sid} closed and options were generated, but the owner DM "
                          f"failed. Fix DMs, then `/resend-options session_id:{sid}`.",
             "waiting": f"⏳ Session #{sid} can't be matched yet (not enough players, or roles "

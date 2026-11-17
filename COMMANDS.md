@@ -95,7 +95,7 @@ Post a recruitment for a specific Thursday. This is the only way recruitments ge
 - `game_date` — The Thursday in YYYY-MM-DD format (must be a Thursday)
 - `channel` *(optional)* — where to post
 - `open_ended` *(optional, default false)* — if true, signups stay open **indefinitely** until you run `/close-signups`; the auto-close skips it. Use this while you're gathering elo data and closing/drafting by hand.
-- `close_day` *(optional, default Monday)* — `Monday`, `Tuesday` or `Wednesday`: the evening of game week (9:30 PM ET) when signups auto-close and the top-3 options are DM'd. Ignored when `open_ended` is true.
+- `close_day` *(optional, default Monday)* — `Monday`, `Tuesday` or `Wednesday`: the evening of game week (9:30 PM ET) when signups auto-close and the top 10 options are DM'd. Ignored when `open_ended` is true.
 
 **Behavior:**
 - Posts to the `channel` you pass, else the configured `recruit` channel (`/set-channel recruit`), else the channel you ran the command in.
@@ -114,7 +114,7 @@ Closes signups for **one specific** recruitment — locks the RSVP buttons (stat
 
 ### `/make-teams [session_id]` (admin)
 
-Closes signups now and DMs the owner the three options, without waiting for the scheduled close. Works on a `recruiting` or `closed` session; defaults to the current one. The reply says what actually happened: options sent, owner DM failed, or not enough players yet.
+Closes signups now and DMs the owner the top 10 team options, without waiting for the scheduled close. Works on a `recruiting` or `closed` session; defaults to the current one. The reply says what actually happened: options sent, owner DM failed, or not enough players yet.
 
 ### `/reopen-signups <session_id>` (admin)
 
@@ -126,11 +126,11 @@ Re-opens signups for a session that is `closed`, `cancelled`, or waiting on a te
 
 ### `/resend-options [session_id]` (admin)
 
-Re-sends the three team options to the owner's DMs for a session that is waiting on a pick. Use it when the original DM failed (DMs closed) or got lost. Defaults to the current session awaiting a pick.
+Re-sends the team options to the owner's DMs for a session that is waiting on a pick. Use it when the original DM failed (DMs closed) or got lost. Defaults to the current session awaiting a pick.
 
 ### `/match-preview` (admin)
 
-Shows the top-3 matchmaker proposals for the currently active recruiting session. Ephemeral — only you see the result. Doesn't commit anything.
+Shows the top 10 matchmaker proposals for the currently active recruiting session. Ephemeral — only you see the result. Doesn't commit anything.
 
 Useful for sanity-checking what the matchmaker will produce before signups close.
 
@@ -385,10 +385,11 @@ When someone runs `/link`, you get a DM with the request and two buttons:
 
 ### Match option choice (DM)
 
-When a recruitment reaches its signup close time (or `/make-teams` is run), you get a DM with the top-3 proposals:
-- **Pick Option A** (green)
-- **Pick Option B** (blue)
-- **Pick Option C** (gray)
+When a recruitment reaches its signup close time (or `/make-teams` is run), you get a DM with the top 10 proposals (Option A to Option J, most balanced first) and one button per option:
+- **Pick A** (green) — the most balanced
+- **Pick B** to **Pick J** (gray)
+
+There can be fewer than 10 when the signups don't allow that many options that differ by at least 2 player swaps.
 
 Click one → bot creates the Match record and posts the chosen teams publicly to the recruit channel. The match is then ready for `/report` once games finish.
 
@@ -405,7 +406,7 @@ These run automatically. (Recruitments themselves are posted manually via `/recr
 Each recruitment stores its own close time (9:30 PM ET on the `close_day` you chose). On every pass, for each recruiting session whose close time has arrived:
 1. Counts `playing` signups (ignores Not Playing and Commentator).
 2. Fewer than 10, or the picked roles can't fill two teams: signups **stay open**, one notice is posted in the recruit channel, and the bot tries again on the next pass. Teams are made as soon as it becomes possible.
-3. 10 or more: refreshes ranks, runs the matchmaker, DMs you the top-3 options, and posts a "teams being finalized" notice.
+3. 10 or more: refreshes ranks, runs the matchmaker, DMs you the top 10 options, and posts a "teams being finalized" notice.
 
 Because it polls, a close that was missed while the bot was restarting is picked up within minutes. Sessions still open more than a day after their game date are marked cancelled automatically.
 
