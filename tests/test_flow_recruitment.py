@@ -336,25 +336,49 @@ async def test_close_signups_then_make_teams_matches(world):
 
 
 @flow
-async def test_owner_gets_ten_options_and_can_pick_a_late_one(world):
-    """The owner DM used to stop at three options (A/B/C)."""
+async def test_owner_gets_three_options(world):
+    """Ten options were offered for a while; most were the same lanes with sides swapped."""
     players, session = await _filled_session(world)
     assert await world.close(session.id) == "matched"
     dm = world.owner_options_message()
-    assert len(dm.embeds) == 10                     # Discord's per-message embed limit
-    assert [e.title for e in dm.embeds] == [f"Option {c}" for c in "ABCDEFGHIJ"]
-    assert [b.label for b in dm.view.children] == [f"Pick {c}" for c in "ABCDEFGHIJ"]
-    assert len({b.custom_id for b in dm.view.children}) == 10
-    assert all(b.row == i // 5 for i, b in enumerate(dm.view.children))   # 5 buttons per row max
-    assert sum(len(e) for e in dm.embeds) <= 6000   # Discord's per-message embed text limit
+    assert [e.title for e in dm.embeds] == [f"Option {c}" for c in "ABC"]
+    assert [b.label for b in dm.view.children] == [f"Pick {c}" for c in "ABC"]
+    assert [b.custom_id for b in dm.view.children] == [f"proposal_pick_{c}" for c in "abc"]
 
-    wanted = dm.embeds[9]
-    done = await world.pick(9)
-    assert "Committed Option J" in done.text
+    wanted = dm.embeds[2]
+    done = await world.pick(2)
+    assert "Committed Option C" in done.text
     match = (await world.matches(session.id))[0]
     for field, saved in zip(wanted.fields, (match.team1_json, match.team2_json)):
         for uid in json.loads(saved).values():
             assert f"<@{uid}>" in field.value
+
+
+@flow
+async def test_a_ten_option_set_sent_earlier_still_resends_and_resolves(world):
+    """Option sets saved while ten were offered must keep all their buttons working."""
+    import bot.cogs.recruitment as recruitment
+    from bot.cogs.views.proposals import ProposalChoiceView
+
+    players, session = await _filled_session(world, start_id=1_234_567_890_123_456_000)
+    before = recruitment.OPTION_COUNT
+    recruitment.OPTION_COUNT = 10                   # how the set was generated back then
+    try:
+        assert await world.close(session.id) == "matched"
+    finally:
+        recruitment.OPTION_COUNT = before
+
+    await world.run(world.recruitment.resend_options, session_id=session.id)
+    dm = world.owner_options_message()
+    assert [e.title for e in dm.embeds] == [f"Option {c}" for c in "ABCDEFGHIJ"]
+    assert [b.label for b in dm.view.children] == [f"Pick {c}" for c in "ABCDEFGHIJ"]
+    assert all(b.row == i // 5 for i, b in enumerate(dm.view.children))   # 5 buttons per row max
+    assert sum(len(e) for e in dm.embeds) <= 6000   # Discord's per-message embed text limit
+    # The view registered at startup still answers every one of those buttons.
+    assert len({b.custom_id for b in ProposalChoiceView().children}) == 10
+
+    assert "Committed Option J" in (await world.pick(9)).text
+    assert len(await world.matches(session.id)) == 1
 
 
 @flow
@@ -495,7 +519,7 @@ async def test_make_teams_can_discard_picked_teams_and_start_over(world):
     new_dm = world.owner_options_message()
     assert new_dm is not picked_dm
 
-    await world.pick(3, message=new_dm)
+    await world.pick(2, message=new_dm)
     matches = await world.matches(session.id)
     assert len(matches) == 1 and matches[0].id != old.id
     assert len([t for t in world.recruit_channel.texts if "Teams finalized" in t]) == 2

@@ -36,7 +36,7 @@ from discord.ext import commands
 from sqlalchemy import select
 
 from bot.cogs.views.proposals import (
-    OPTION_COUNT, ProposalChoiceView, _team_lines, option_color, option_label,
+    MAX_OPTIONS, OPTION_COUNT, ProposalChoiceView, _team_lines, option_color, option_label,
 )
 from bot.cogs.views.rsvp import RsvpView, _build_public_embed, _refresh_public_counts
 from bot.config import ELO_KEY, Config, ROLES
@@ -330,7 +330,8 @@ class RecruitmentCog(commands.Cog):
             if ps is None:
                 return False
             session = await db.get(InhouseSession, ps.session_id)
-            proposals = json.loads(ps.proposals_json)[:OPTION_COUNT]
+            # Every saved option is shown (a set saved while ten were offered keeps all ten).
+            proposals = json.loads(ps.proposals_json)[:MAX_OPTIONS]
             # Everyone's current elo per role: each option shows a player's elo in
             # the role that option seats them in (what the diffs are worked out from).
             player_ids = {int(uid) for p in proposals for t in ("team1", "team2") for uid in p[t].values()}
@@ -515,7 +516,7 @@ class RecruitmentCog(commands.Cog):
     @app_commands.command(name="match-preview", description="(admin) Show what teams would be generated right now.")
     @app_commands.describe(
         session_id="Session ID (from the recruitment footer). Defaults to the soonest active session.",
-        show_all="List every no-off-role team comp (most even lanes first) instead of just the top 10.",
+        show_all="List every no-off-role team comp (most even lanes first) instead of just the top 3.",
     )
     async def match_preview(
         self,

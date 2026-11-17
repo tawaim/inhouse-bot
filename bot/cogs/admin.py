@@ -1220,7 +1220,7 @@ class AdminCog(commands.Cog):
 
     @app_commands.command(
         name="make-teams",
-        description="(admin) Close signups and DM the owner the top 10 team options. Run again to regenerate.",
+        description="(admin) Close signups and DM the owner the top 3 team options. Run again to regenerate.",
     )
     @app_commands.describe(
         session_id="Session ID. Defaults to the current open session, else the one awaiting a pick.",

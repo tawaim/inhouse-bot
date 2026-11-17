@@ -95,7 +95,7 @@ Post a recruitment for a specific Thursday. This is the only way recruitments ge
 - `game_date` — The Thursday in YYYY-MM-DD format (must be a Thursday)
 - `channel` *(optional)* — where to post
 - `open_ended` *(optional, default false)* — if true, signups stay open **indefinitely** until you run `/close-signups`; the auto-close skips it. Use this while you're gathering elo data and closing/drafting by hand.
-- `close_day` *(optional, default Monday)* — `Monday`, `Tuesday` or `Wednesday`: the evening of game week (9:30 PM ET) when signups auto-close and the top 10 options are DM'd. Ignored when `open_ended` is true.
+- `close_day` *(optional, default Monday)* — `Monday`, `Tuesday` or `Wednesday`: the evening of game week (9:30 PM ET) when signups auto-close and the top 3 options are DM'd. Ignored when `open_ended` is true.
 
 **Behavior:**
 - Posts to the `channel` you pass, else the configured `recruit` channel (`/set-channel recruit`), else the channel you ran the command in.
@@ -114,7 +114,7 @@ Closes signups for **one specific** recruitment — locks the RSVP buttons (stat
 
 ### `/make-teams [session_id]` (admin)
 
-Closes signups now and DMs the owner the top 10 team options, without waiting for the scheduled close. Works on a `recruiting` or `closed` session; defaults to the current one. The reply says what actually happened: options sent, owner DM failed, or not enough players yet.
+Closes signups now and DMs the owner the top 3 team options, without waiting for the scheduled close. Works on a `recruiting` or `closed` session; defaults to the current one. The reply says what actually happened: options sent, owner DM failed, or not enough players yet.
 
 **Re-running:** run it again on a session that is waiting on a pick (options sent, none chosen) to generate the options afresh from the current signups and ratings. The earlier DM's buttons stop working, signups stay closed and nothing is posted in the recruit channel. With no `session_id` it takes an open session first, and otherwise the one awaiting a pick. Once an option has been picked it refuses, unless you pass `discard_teams:true`: that deletes the picked match (only if no result has been reported for it) and sends fresh options so you can pick again. The old teams post and any team channels stay up; run `/clear-match-channels` first if channels were built for the discarded teams. To edit picked teams rather than redo them, use `/manual-match`. To change who is playing before re-running, use `/reopen-signups`.
 
@@ -132,7 +132,7 @@ Re-sends the team options to the owner's DMs for a session that is waiting on a 
 
 ### `/match-preview` (admin)
 
-Shows the top 10 matchmaker proposals for the currently active recruiting session. Ephemeral — only you see the result. Doesn't commit anything.
+Shows the top 3 matchmaker proposals for the currently active recruiting session. Ephemeral — only you see the result. Doesn't commit anything.
 
 Useful for sanity-checking what the matchmaker will produce before signups close.
 
@@ -387,12 +387,12 @@ When someone runs `/link`, you get a DM with the request and two buttons:
 
 ### Match option choice (DM)
 
-When a recruitment reaches its signup close time (or `/make-teams` is run), you get a DM with the top 10 proposals (Option A to Option J, most balanced first) and one button per option:
+When a recruitment reaches its signup close time (or `/make-teams` is run), you get a DM with the top 3 proposals (Option A to Option C, most balanced first) and one button per option:
 - Each player is listed as `name - role elo (INHOUSE elo)`: their current elo in the role that option gives them, then their INHOUSE elo in brackets. The key is in the footer of the last option. The lane and team diffs are worked out from the role elos
 - **Pick A** (green) — the most balanced
-- **Pick B** to **Pick J** (gray)
+- **Pick B** and **Pick C** (gray)
 
-There can be fewer than 10 when the signups don't allow that many options that differ by at least 2 player swaps.
+There can be fewer than 3 when the signups don't allow that many options that differ by at least 2 player swaps.
 
 Click one → bot creates the Match record, posts the chosen teams publicly to the recruit channel (each player as `name - role elo (INHOUSE elo)`, with the key at the bottom of the post), and builds the per-team roles and private channels, the same as `/match-channels`. The DM tells you how the channel build went; with no category set (`/set-match-category`) the match is still saved and you are told to configure one. The match is then ready for `/report` once games finish.
 
@@ -411,7 +411,7 @@ These run automatically. (Recruitments themselves are posted manually via `/recr
 Each recruitment stores its own close time (9:30 PM ET on the `close_day` you chose). On every pass, for each recruiting session whose close time has arrived:
 1. Counts `playing` signups (ignores Not Playing and Commentator).
 2. Fewer than 10, or the picked roles can't fill two teams: signups **stay open**, one notice is posted in the recruit channel, and the bot tries again on the next pass. Teams are made as soon as it becomes possible.
-3. 10 or more: refreshes ranks, runs the matchmaker, and DMs you the top 10 options. Nothing is posted in the recruit channel until you pick one.
+3. 10 or more: refreshes ranks, runs the matchmaker, and DMs you the top 3 options. Nothing is posted in the recruit channel until you pick one.
 
 Because it polls, a close that was missed while the bot was restarting is picked up within minutes. Sessions still open more than a day after their game date are marked cancelled automatically.
 

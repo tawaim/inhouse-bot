@@ -34,9 +34,12 @@ def _team_lines(
 # Owner choice view (for picking among the top match options)
 # =============================================================================
 
-# How many team options the matchmaker offers the owner. Ten is the most that
-# fits one DM: Discord allows 10 embeds per message (one per option).
-OPTION_COUNT = 10
+# How many team options the matchmaker offers the owner.
+OPTION_COUNT = 3
+# The most options one DM can carry: Discord allows 10 embeds per message (one
+# per option). Pick buttons exist for all of these, so the buttons on DMs sent
+# while OPTION_COUNT was 10 keep working.
+MAX_OPTIONS = 10
 
 
 def option_label(index: int) -> str:
@@ -55,7 +58,8 @@ class _PickButton(discord.ui.Button):
         super().__init__(
             label=f"Pick {option_label(index)}",
             style=discord.ButtonStyle.success if index == 0 else discord.ButtonStyle.secondary,
-            # a/b/c match the IDs on option DMs sent before there were ten.
+            # Stable IDs: a/b/c have been on every option DM; d..j were on the
+            # ten-option DMs.
             custom_id=f"proposal_pick_{option_label(index).lower()}",
             row=index // 5,
         )
@@ -69,13 +73,13 @@ class ProposalChoiceView(discord.ui.View):
     """Persistent view DM'd to the owner with one button per option (A, B, ...).
     Custom IDs are stable across restarts. The handlers re-fetch state from DB.
 
-    With no arguments it carries all OPTION_COUNT buttons, which is what the
+    With no arguments it carries all MAX_OPTIONS buttons, which is what the
     post-restart re-registration needs.
     """
 
-    def __init__(self, proposal_set_id: int = 0, count: int = OPTION_COUNT):
+    def __init__(self, proposal_set_id: int = 0, count: int = MAX_OPTIONS):
         super().__init__(timeout=None)
-        for i in range(min(count, OPTION_COUNT)):
+        for i in range(min(count, MAX_OPTIONS)):
             self.add_item(_PickButton(i))
 
 

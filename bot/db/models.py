@@ -214,7 +214,7 @@ class GameStat(Base):
 
 
 class ProposalSet(Base):
-    """Holds the top match proposals (up to 10) while waiting for the owner to pick one.
+    """Holds the top match proposals (3; sets saved while ten were offered hold 10) while waiting for the owner to pick one.
     Once the owner clicks an option, that proposal is committed as a Match
     row and this row is marked resolved.
     """
