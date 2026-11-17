@@ -39,7 +39,7 @@ from bot.cogs.views.proposals import (
     OPTION_COUNT, ProposalChoiceView, _team_lines, option_color, option_label,
 )
 from bot.cogs.views.rsvp import RsvpView, _build_public_embed, _refresh_public_counts
-from bot.config import Config, ROLES
+from bot.config import ELO_KEY, Config, ROLES
 from bot.db.models import GuildConfig, Match, Player, ProposalSet, Rating, Session as InhouseSession, Signup
 from bot.db.session import get_session
 from bot.services.elo import DEFAULT_ELO, INHOUSE_ROLE
@@ -331,14 +331,15 @@ class RecruitmentCog(commands.Cog):
                 return False
             session = await db.get(InhouseSession, ps.session_id)
             proposals = json.loads(ps.proposals_json)[:OPTION_COUNT]
-            # Everyone's current INHOUSE elo, shown after their name in each option.
+            # Everyone's current elo per role: each option shows a player's elo in
+            # the role that option seats them in (what the diffs are worked out from).
             player_ids = {int(uid) for p in proposals for t in ("team1", "team2") for uid in p[t].values()}
-            inhouse = {uid: float(DEFAULT_ELO) for uid in player_ids}
+            role_elo: dict[tuple[int, str], float] = {}
             if player_ids:
                 for r in (await db.execute(
-                    select(Rating).where(Rating.role == INHOUSE_ROLE, Rating.discord_id.in_(player_ids))
+                    select(Rating).where(Rating.discord_id.in_(player_ids))
                 )).scalars().all():
-                    inhouse[r.discord_id] = r.elo
+                    role_elo[(r.discord_id, r.role)] = r.elo
         session_id = session.id
 
         try:
@@ -354,13 +355,25 @@ class RecruitmentCog(commands.Cog):
             embed = discord.Embed(title=f"Option {option_label(i)}", color=option_color(i))
             team1 = {role: int(uid) for role, uid in proposal["team1"].items()}
             team2 = {role: int(uid) for role, uid in proposal["team2"].items()}
-            embed.add_field(name=f"🔵 {TEAM_NAMES[1]}", value=_team_lines(team1, elo_map=inhouse), inline=True)
-            embed.add_field(name=f"🔴 {TEAM_NAMES[2]}", value=_team_lines(team2, elo_map=inhouse), inline=True)
+            elos = {
+                uid: role_elo.get((uid, role), float(DEFAULT_ELO))
+                for team in (team1, team2) for role, uid in team.items()
+            }
+            inhouse = {uid: role_elo.get((uid, INHOUSE_ROLE), float(DEFAULT_ELO)) for uid in elos}
+            embed.add_field(
+                name=f"🔵 {TEAM_NAMES[1]}",
+                value=_team_lines(team1, elo_map=elos, inhouse_map=inhouse), inline=True)
+            embed.add_field(
+                name=f"🔴 {TEAM_NAMES[2]}",
+                value=_team_lines(team2, elo_map=elos, inhouse_map=inhouse), inline=True)
             lane = proposal.get("lane_diff")
-            embed.set_footer(text=(
+            footer = (
                 f"Lane diff: {lane:.0f} · Team diff: {proposal['balance_diff']:.0f}"
                 if lane is not None else f"Skill diff: {proposal['balance_diff']:.2f}"
-            ))
+            )
+            if i == len(proposals) - 1:  # the key goes once, at the bottom of the DM
+                footer += f"\n{ELO_KEY} · lane and team diff use role elo"
+            embed.set_footer(text=footer)
             embeds.append(embed)
 
         # Plain text, not an embed: Discord allows 10 embeds per message and the
@@ -368,8 +381,7 @@ class RecruitmentCog(commands.Cog):
         intro = (
             f"📊 **Match options for Thursday {session.game_date.strftime('%b %d, %Y')}**\n"
             f"{len(proposals)} balanced option{'s' if len(proposals) != 1 else ''} below, "
-            f"ranked by quality (Option A is the most balanced). "
-            f"The number after each name is their INHOUSE elo.\n\n"
+            f"ranked by quality (Option A is the most balanced).\n\n"
             f"Click a button to commit that option to the inhouse for elo tracking. "
             f"The chosen teams will be posted publicly to the recruit channel."
         )

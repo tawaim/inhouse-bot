@@ -9,10 +9,10 @@ from datetime import datetime
 import discord
 from sqlalchemy import select
 
-from bot.config import format_team_lines
+from bot.config import ELO_KEY, format_team_lines
 from bot.db.models import Match, ProposalSet, Rating, Session as InhouseSession
 from bot.db.session import get_session
-from bot.services.elo import DEFAULT_ELO
+from bot.services.elo import DEFAULT_ELO, INHOUSE_ROLE
 from bot.services.rosters import TEAM_NAMES
 
 log = logging.getLogger(__name__)
@@ -24,8 +24,10 @@ def _team_lines(
     emoji: bool = True,
     name_map: dict[int, str] | None = None,
     elo_map: dict[int, float] | None = None,
+    inhouse_map: dict[int, float] | None = None,
 ) -> str:
-    return format_team_lines(by_role, emoji=emoji, name_map=name_map, elo_map=elo_map)
+    return format_team_lines(
+        by_role, emoji=emoji, name_map=name_map, elo_map=elo_map, inhouse_map=inhouse_map)
 
 
 # =============================================================================
@@ -139,12 +141,16 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
 
         session = await db.get(InhouseSession, ps.session_id)
 
-        # Each player's elo in the role they were given, for the public post.
+        # Each player's elo in the role they were given, and their INHOUSE elo,
+        # for the public post.
         elo_map: dict[int, float] = {}
+        inhouse_map: dict[int, float] = {}
         for team in (chosen["team1"], chosen["team2"]):
             for role, uid in team.items():
                 rating = await db.get(Rating, (int(uid), role))
                 elo_map[int(uid)] = rating.elo if rating else DEFAULT_ELO
+                overall = await db.get(Rating, (int(uid), INHOUSE_ROLE))
+                inhouse_map[int(uid)] = overall.elo if overall else DEFAULT_ELO
 
     # Disable all buttons on the DM
     view = ProposalChoiceView(count=len(proposals_data))
@@ -175,8 +181,8 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
             uid: (m.display_name if guild and (m := guild.get_member(uid)) else str(uid))
             for uid in all_ids
         }
-        embed.add_field(name=f"🔵 {TEAM_NAMES[1]} (Blue)", value=_team_lines(chosen["team1"], name_map=name_map, elo_map=elo_map), inline=True)
-        embed.add_field(name=f"🔴 {TEAM_NAMES[2]} (Red)", value=_team_lines(chosen["team2"], name_map=name_map, elo_map=elo_map), inline=True)
+        embed.add_field(name=f"🔵 {TEAM_NAMES[1]} (Blue)", value=_team_lines(chosen["team1"], name_map=name_map, elo_map=elo_map, inhouse_map=inhouse_map), inline=True)
+        embed.add_field(name=f"🔴 {TEAM_NAMES[2]} (Red)", value=_team_lines(chosen["team2"], name_map=name_map, elo_map=elo_map, inhouse_map=inhouse_map), inline=True)
         lane = chosen.get("lane_diff")
         balance_part = (
             f"Lane diff: {lane:.0f} · Team diff: {chosen['balance_diff']:.0f}"
@@ -184,7 +190,7 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
         )
         embed.set_footer(
             text=f"Match {match.id} · Session #{session.id} (Option {label}) · "
-                 f"{balance_part} · Game time: Thu 9:00 PM ET"
+                 f"{balance_part} · Game time: Thu 9:00 PM ET\n{ELO_KEY}"
         )
         try:
             await channel.send(content="🔒 Teams finalized:", embed=embed)

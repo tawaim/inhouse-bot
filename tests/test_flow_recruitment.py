@@ -358,23 +358,42 @@ async def test_owner_gets_ten_options_and_can_pick_a_late_one(world):
 
 
 @flow
-async def test_options_dm_shows_each_players_inhouse_elo(world):
-    """The options DM listed names only, so the owner picked without seeing anyone's elo."""
+async def test_options_dm_shows_role_elo_then_inhouse_elo_with_a_key_at_the_bottom(world):
+    """The options DM listed names only; then INHOUSE elos alone, which don't add up
+    to the lane/team diffs in the footer (those are worked out from role elos)."""
     from bot.db.models import Rating
     from bot.db.session import get_session
 
-    players, session = await _filled_session(world)
-    async with get_session() as db:                         # INHOUSE differs from the role elos
+    roles = ["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]
+    # Real-length Discord IDs, so the size check below means something.
+    players, session = await _filled_session(world, start_id=1_234_567_890_123_456_000)
+    async with get_session() as db:                         # every role and INHOUSE differ
         for p in players:
-            (await db.get(Rating, (p.id, "INHOUSE"))).elo += 7
+            for bump, role in enumerate(roles):
+                (await db.get(Rating, (p.id, role))).elo += bump
+            (await db.get(Rating, (p.id, "INHOUSE"))).elo += 500
         await db.commit()
+    ratings = await world.ratings()
     await world.close(session.id)
     dm = world.owner_options_message()
-    assert "INHOUSE elo" in dm.content
     for embed in dm.embeds:
-        lines = "\n".join(f.value for f in embed.fields)
-        for i, p in enumerate(players):
-            assert f"{p.mention} ({1500 + 30 * i + 7})" in lines
+        totals = []
+        for field in embed.fields:                          # one field per team, TOP..SUPPORT
+            lines = field.value.split("\n")
+            assert len(lines) == 5
+            total = 0
+            for role, line in zip(roles, lines):
+                uid = int(line.split("<@")[1].split(">")[0])
+                assert line.endswith(
+                    f"<@{uid}> - {ratings[(uid, role)][0]} ({ratings[(uid, 'INHOUSE')][0]})")
+                total += ratings[(uid, role)][0]
+            totals.append(total)
+        # The role elos shown add up to the team diff in the footer.
+        assert f"Team diff: {abs(totals[0] - totals[1])}" in embed.footer.text
+    # The key appears once, at the very bottom of the DM.
+    key = "name - role elo (INHOUSE elo)"
+    assert key in dm.embeds[-1].footer.text
+    assert dm.text.count(key) == 1
     assert sum(len(e) for e in dm.embeds) <= 6000   # Discord's per-message embed text limit
 
 
@@ -385,21 +404,23 @@ async def test_final_teams_post_shows_each_players_elo_in_their_role(world):
     from bot.db.session import get_session
 
     players, session = await _filled_session(world)
-    async with get_session() as db:                         # make role elos differ per role
+    async with get_session() as db:                         # every role and INHOUSE differ
         for p in players:
             for bump, role in enumerate(["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]):
                 (await db.get(Rating, (p.id, role))).elo += bump
+            (await db.get(Rating, (p.id, "INHOUSE"))).elo += 500
         await db.commit()
     await world.close(session.id)
     await world.pick(0)
     final = next(t for t in world.recruit_channel.texts if "Teams finalized" in t)
+    assert final.rstrip().endswith("Key: name - role elo (INHOUSE elo)")   # the key, at the bottom
     match = (await world.matches(session.id))[0]
     ratings = await world.ratings()
     seated = {**json.loads(match.team1_json), **{f"2{r}": u for r, u in json.loads(match.team2_json).items()}}
     assert len(seated) == 10
     for role, uid in seated.items():
         role = role.lstrip("2")
-        assert f"P{uid} ({ratings[(uid, role)][0]})" in final
+        assert f"P{uid} - {ratings[(uid, role)][0]} ({ratings[(uid, 'INHOUSE')][0]})" in final
 
 
 @flow

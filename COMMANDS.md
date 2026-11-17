@@ -388,13 +388,13 @@ When someone runs `/link`, you get a DM with the request and two buttons:
 ### Match option choice (DM)
 
 When a recruitment reaches its signup close time (or `/make-teams` is run), you get a DM with the top 10 proposals (Option A to Option J, most balanced first) and one button per option:
-- Each player is listed with their current INHOUSE elo in brackets (the lane and team diffs in the footer are still worked out from role elos)
+- Each player is listed as `name - role elo (INHOUSE elo)`: their current elo in the role that option gives them, then their INHOUSE elo in brackets. The key is in the footer of the last option. The lane and team diffs are worked out from the role elos
 - **Pick A** (green) — the most balanced
 - **Pick B** to **Pick J** (gray)
 
 There can be fewer than 10 when the signups don't allow that many options that differ by at least 2 player swaps.
 
-Click one → bot creates the Match record, posts the chosen teams publicly to the recruit channel (each player with their elo in the role they were given), and builds the per-team roles and private channels, the same as `/match-channels`. The DM tells you how the channel build went; with no category set (`/set-match-category`) the match is still saved and you are told to configure one. The match is then ready for `/report` once games finish.
+Click one → bot creates the Match record, posts the chosen teams publicly to the recruit channel (each player as `name - role elo (INHOUSE elo)`, with the key at the bottom of the post), and builds the per-team roles and private channels, the same as `/match-channels`. The DM tells you how the channel build went; with no category set (`/set-match-category`) the match is still saved and you are told to configure one. The match is then ready for `/report` once games finish.
 
 Roles left over from an earlier match are not cleared by the build: run `/clear-match-channels` after each week so last week's players don't keep access to this week's team channels.
 

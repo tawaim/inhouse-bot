@@ -62,6 +62,8 @@ ROLES = ["TOP", "JUNGLE", "MID", "BOT", "SUPPORT"]  # ordered, no FILL
 
 ROLE_SHORT = {"TOP": "TOP", "JUNGLE": "JUN", "MID": "MID", "BOT": "BOT", "SUPPORT": "SUP"}
 NAME_MAX = 14
+# The key for rosters rendered with both elo maps (see format_team_lines).
+ELO_KEY = "Key: name - role elo (INHOUSE elo)"
 
 
 def format_team_lines(
@@ -69,13 +71,15 @@ def format_team_lines(
     emoji: bool = True,
     name_map: dict[int, str] | None = None,
     elo_map: dict[int, float] | None = None,
+    inhouse_map: dict[int, float] | None = None,
 ) -> str:
     """Render a team roster top-down: TOP, JUN, MID, BOT, SUP.
 
     If name_map is provided, names are shown as plain text truncated to NAME_MAX
-    characters instead of Discord mentions. If elo_map is provided, each player's
-    elo (the caller passes the one for the role they are seated in) follows
-    their name in brackets.
+    characters instead of Discord mentions. If elo_map is provided, each name is
+    followed by " - <role elo>" (the caller passes each player's elo in the role
+    they are seated in), and by " (<INHOUSE elo>)" as well when inhouse_map is
+    provided: the layout ELO_KEY describes.
     """
     out = []
     for role in ROLES:
@@ -89,6 +93,10 @@ def format_team_lines(
                 name = name[:NAME_MAX - 1] + "…"
         else:
             name = f"<@{uid}>"
-        elo = f" ({elo_map[uid]:.0f})" if elo_map is not None and uid in elo_map else ""
+        elo = ""
+        if elo_map is not None and uid in elo_map:
+            elo = f" - {elo_map[uid]:.0f}"
+            if inhouse_map is not None and uid in inhouse_map:
+                elo += f" ({inhouse_map[uid]:.0f})"
         out.append(f"{prefix}**{ROLE_SHORT[role]}**: {name}{elo}")
     return "\n".join(out)
