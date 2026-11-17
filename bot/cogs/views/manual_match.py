@@ -15,6 +15,7 @@ from bot.db.models import Match, Player, Session as InhouseSession
 from bot.db.session import get_session
 from bot.services.elo import parse_series_score
 from bot.services.names import resolve_name_block
+from bot.services.pins import pin_current
 from bot.services.ratings_lock import ratings_lock
 from bot.services.rosters import (
     TEAM_NAMES,
@@ -148,7 +149,8 @@ class ManualMatchModal(discord.ui.Modal, title="Manual Match Entry"):
         if channel_id:
             channel = interaction.client.get_channel(channel_id)
             if channel:
-                await channel.send(content=f"🔒 Teams ({verb}):", embed=embed)
+                teams_msg = await channel.send(content=f"🔒 Teams ({verb}):", embed=embed)
+                await pin_current(teams_msg, interaction.client.user)
 
         posted = " Posted to recruit channel." if channel_id else ""
         msg = (

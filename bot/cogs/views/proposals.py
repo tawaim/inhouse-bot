@@ -13,6 +13,7 @@ from bot.config import ELO_KEY, SEASON_NUMBER, format_team_lines
 from bot.db.models import Match, ProposalSet, Rating, Session as InhouseSession
 from bot.db.session import get_session
 from bot.services.elo import DEFAULT_ELO, INHOUSE_ROLE
+from bot.services.pins import pin_current
 from bot.services.rosters import TEAM_NAMES
 
 log = logging.getLogger(__name__)
@@ -204,10 +205,13 @@ async def _handle_proposal_pick(interaction: discord.Interaction, choice_index: 
         # in the DM instead.
         embed.set_footer(text=f"{balance_part}\n{ELO_KEY}")
         try:
-            await channel.send(content="🔒 Teams finalized:", embed=embed)
+            teams_msg = await channel.send(content="🔒 Teams finalized:", embed=embed)
             posted = True
         except discord.HTTPException:
             log.exception("Failed to post final teams for session %s", session.id)
+        else:
+            # The teams post replaces the recruitment post in the pins.
+            await pin_current(teams_msg, interaction.client.user)
     if not posted:
         # The DM above already said "Posted", so correct it rather than leave the
         # owner thinking teams went out.

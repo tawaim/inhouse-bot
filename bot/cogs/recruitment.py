@@ -43,6 +43,7 @@ from bot.config import ELO_KEY, Config, ROLES
 from bot.db.models import GuildConfig, Match, Player, ProposalSet, Rating, Session as InhouseSession, Signup
 from bot.db.session import get_session
 from bot.services.elo import DEFAULT_ELO, INHOUSE_ROLE
+from bot.services.pins import pin_current
 from bot.services.matchmaking import PlayerInput, make_all_matches, make_match, make_top_matches
 from bot.services.rosters import TEAM_NAMES, format_roster_block
 from bot.services.sessions import _select_playing, find_current_session, signups_close_local
@@ -154,6 +155,7 @@ class RecruitmentCog(commands.Cog):
             session.recruit_msg_id = msg.id
             await db.commit()
             await db.refresh(session)
+        await pin_current(msg, self.bot.user)
         return session
 
     def _today(self) -> date:

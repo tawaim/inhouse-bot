@@ -24,12 +24,21 @@ def _config(db_path: str) -> Config:
 class _Msg:
     id = 555
 
+    def __init__(self, channel):
+        self.channel = channel
+
+    async def pin(self, **kwargs):
+        pass
+
 
 class _Chan:
     id = 999
 
     async def send(self, **kwargs):
-        return _Msg()
+        return _Msg(self)
+
+    async def pins(self):
+        return []
 
 
 def test_open_ended_post_has_no_close(tmp_path):
@@ -37,7 +46,7 @@ def test_open_ended_post_has_no_close(tmp_path):
 
     async def body():
         await init_db(cfg)
-        cog = RecruitmentCog(types.SimpleNamespace(), cfg)
+        cog = RecruitmentCog(types.SimpleNamespace(user=None), cfg)
         session = await cog.post_recruitment(date(2026, 6, 4), channel=_Chan(), open_ended=True)
         assert session.signups_close_at is None  # open-ended => no scheduled close
         assert session.status == "recruiting"
@@ -51,7 +60,7 @@ def test_scheduled_post_sets_close(tmp_path):
 
     async def body():
         await init_db(cfg)
-        cog = RecruitmentCog(types.SimpleNamespace(), cfg)
+        cog = RecruitmentCog(types.SimpleNamespace(user=None), cfg)
         session = await cog.post_recruitment(date(2026, 6, 4), channel=_Chan(), open_ended=False)
         assert session.signups_close_at is not None  # Monday-before 9:30 PM
         await close_db()

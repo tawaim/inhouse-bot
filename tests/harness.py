@@ -73,6 +73,17 @@ class FakeMessage:
         self.view = kwargs.get("view")
         self.kwargs = kwargs
         self.edits: list[dict] = []
+        # Channel posts are the bot's unless a test says otherwise.
+        self.author = getattr(getattr(channel, "guild", None), "me", None)
+        self.pinned = False
+
+    async def pin(self, **kwargs):
+        if getattr(self.channel, "fail_pins", False):
+            raise http_error(403)
+        self.pinned = True
+
+    async def unpin(self, **kwargs):
+        self.pinned = False
 
     async def edit(self, **kwargs):
         self.edits.append(kwargs)
@@ -123,6 +134,9 @@ class _Sendable:
             if m.id == message_id:
                 return m
         return FakeMessage(self)
+
+    async def pins(self):
+        return [m for m in self.sent if m.pinned]
 
     @property
     def texts(self) -> list[str]:

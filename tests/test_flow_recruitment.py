@@ -491,6 +491,41 @@ async def test_pick_still_commits_when_no_match_category_is_set(world):
 
 
 @flow
+async def test_the_current_event_post_is_the_bots_only_pin(world):
+    """Nothing was pinned, and pins from past events were never cleared."""
+    from tests.harness import FakeMessage
+
+    chan = world.recruit_channel
+    human = await chan.send("house rules")                    # a person's pin stays
+    human.author, human.pinned = object(), True
+
+    old = await world.recruit(THURSDAY)
+    old_post = await chan.fetch_message(old.recruit_msg_id)
+    assert old_post.pinned
+    await world.set_session(old.id, status="completed")
+
+    players, session = await _filled_session(world, game_date=NEXT_THURSDAY)
+    recruit_post = await chan.fetch_message(session.recruit_msg_id)
+    assert recruit_post.pinned and not old_post.pinned
+
+    await world.close(session.id)
+    await world.pick(0)
+    teams_post = next(m for m in chan.sent if "Teams finalized" in m.text)
+    assert teams_post.pinned and not recruit_post.pinned and human.pinned
+    assert [m for m in await chan.pins() if m is not human] == [teams_post]
+
+
+@flow
+async def test_a_pin_that_fails_does_not_stop_the_post(world):
+    world.recruit_channel.fail_pins = True
+    players, session = await _filled_session(world)
+    await world.close(session.id)
+    await world.pick(0)
+    assert any("Teams finalized" in t for t in world.recruit_channel.texts)
+    assert len(await world.matches(session.id)) == 1
+
+
+@flow
 async def test_make_teams_reruns_a_session_awaiting_a_pick(world):
     """Re-running used to need /reopen-signups first: /make-teams said the session wasn't open."""
     players, session = await _filled_session(world)

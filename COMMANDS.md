@@ -99,6 +99,7 @@ Post a recruitment for a specific Thursday. This is the only way recruitments ge
 
 **Behavior:**
 - Posts to the `channel` you pass, else the configured `recruit` channel (`/set-channel recruit`), else the channel you ran the command in.
+- Pins the post, and unpins the bot's posts for earlier events in that channel (pins made by people are left alone). The teams post takes over the pin once teams are picked or entered with `/manual-match`.
 - Adds the three RSVP buttons: 🎮 Playing, ❌ Not Playing, 📺 Commentator
 - 🎮 Playing opens a private role picker. If the player has signed up to play before, they are signed up immediately with the roles they chose last time and the picker is pre-filled, so ignoring the picker still counts them in; they can change the roles and click Done. A first-time player has no previous roles and must pick at least one (or Fill) and click Done to be signed up.
 - The recruitment embed footer shows `Session #N` — use that id with `/signups`, `/close-signups`, `/manual-match`, `/report-manual`, etc.
@@ -280,7 +281,7 @@ SUPPORT: @jack
 - No player can be on both teams
 - All entries must be Discord @-mentions (won't accept plain names like "alice")
 
-When validated, the match is created and posted publicly to the recruit channel. Works even after the auto-matchmaker has already run.
+When validated, the match is created and posted publicly to the recruit channel, and that post becomes the bot's pinned post there. Works even after the auto-matchmaker has already run.
 
 Targets the soonest active session by default; pass `session_id` (from the recruitment post footer) or `game_date` to target a specific night.
 
@@ -394,7 +395,7 @@ When a recruitment reaches its signup close time (or `/make-teams` is run), you 
 
 There can be fewer than 3 when the signups don't allow that many options that differ by at least 2 player swaps.
 
-Click one → bot creates the Match record, posts the chosen teams publicly to the recruit channel (each player as `name - role elo (INHOUSE elo)`, with the key at the bottom of the post), and builds the per-team roles and private channels, the same as `/match-channels`. The DM tells you how the channel build went; with no category set (`/set-match-category`) the match is still saved and you are told to configure one. The match is then ready for `/report` once games finish.
+Click one → bot creates the Match record, posts the chosen teams publicly to the recruit channel (each player as `name - role elo (INHOUSE elo)`, with the key at the bottom of the post), pins that post in place of the recruitment post, and builds the per-team roles and private channels, the same as `/match-channels`. The DM tells you how the channel build went; with no category set (`/set-match-category`) the match is still saved and you are told to configure one. The match is then ready for `/report` once games finish.
 
 Roles left over from an earlier match are not cleared by the build: run `/clear-match-channels` after each week so last week's players don't keep access to this week's team channels.
 
