@@ -42,6 +42,7 @@ from bot.cogs.views.rsvp import RsvpView, _build_public_embed, _refresh_public_c
 from bot.config import Config, ROLES
 from bot.db.models import GuildConfig, Match, Player, ProposalSet, Rating, Session as InhouseSession, Signup
 from bot.db.session import get_session
+from bot.services.elo import DEFAULT_ELO, INHOUSE_ROLE
 from bot.services.matchmaking import PlayerInput, make_all_matches, make_match, make_top_matches
 from bot.services.rosters import TEAM_NAMES, format_roster_block
 from bot.services.sessions import _select_playing, find_current_session, signups_close_local
@@ -329,7 +330,15 @@ class RecruitmentCog(commands.Cog):
             if ps is None:
                 return False
             session = await db.get(InhouseSession, ps.session_id)
-            proposals = json.loads(ps.proposals_json)
+            proposals = json.loads(ps.proposals_json)[:OPTION_COUNT]
+            # Everyone's current INHOUSE elo, shown after their name in each option.
+            player_ids = {int(uid) for p in proposals for t in ("team1", "team2") for uid in p[t].values()}
+            inhouse = {uid: float(DEFAULT_ELO) for uid in player_ids}
+            if player_ids:
+                for r in (await db.execute(
+                    select(Rating).where(Rating.role == INHOUSE_ROLE, Rating.discord_id.in_(player_ids))
+                )).scalars().all():
+                    inhouse[r.discord_id] = r.elo
         session_id = session.id
 
         try:
@@ -340,14 +349,13 @@ class RecruitmentCog(commands.Cog):
             await self._warn_owner_dm_failed(session_id)
             return False
 
-        proposals = proposals[:OPTION_COUNT]
         embeds = []
         for i, proposal in enumerate(proposals):
             embed = discord.Embed(title=f"Option {option_label(i)}", color=option_color(i))
             team1 = {role: int(uid) for role, uid in proposal["team1"].items()}
             team2 = {role: int(uid) for role, uid in proposal["team2"].items()}
-            embed.add_field(name=f"🔵 {TEAM_NAMES[1]}", value=_team_lines(team1), inline=True)
-            embed.add_field(name=f"🔴 {TEAM_NAMES[2]}", value=_team_lines(team2), inline=True)
+            embed.add_field(name=f"🔵 {TEAM_NAMES[1]}", value=_team_lines(team1, elo_map=inhouse), inline=True)
+            embed.add_field(name=f"🔴 {TEAM_NAMES[2]}", value=_team_lines(team2, elo_map=inhouse), inline=True)
             lane = proposal.get("lane_diff")
             embed.set_footer(text=(
                 f"Lane diff: {lane:.0f} · Team diff: {proposal['balance_diff']:.0f}"
@@ -360,7 +368,8 @@ class RecruitmentCog(commands.Cog):
         intro = (
             f"📊 **Match options for Thursday {session.game_date.strftime('%b %d, %Y')}**\n"
             f"{len(proposals)} balanced option{'s' if len(proposals) != 1 else ''} below, "
-            f"ranked by quality (Option A is the most balanced).\n\n"
+            f"ranked by quality (Option A is the most balanced). "
+            f"The number after each name is their INHOUSE elo.\n\n"
             f"Click a button to commit that option to the inhouse for elo tracking. "
             f"The chosen teams will be posted publicly to the recruit channel."
         )

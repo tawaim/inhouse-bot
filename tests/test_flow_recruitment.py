@@ -358,6 +358,27 @@ async def test_owner_gets_ten_options_and_can_pick_a_late_one(world):
 
 
 @flow
+async def test_options_dm_shows_each_players_inhouse_elo(world):
+    """The options DM listed names only, so the owner picked without seeing anyone's elo."""
+    from bot.db.models import Rating
+    from bot.db.session import get_session
+
+    players, session = await _filled_session(world)
+    async with get_session() as db:                         # INHOUSE differs from the role elos
+        for p in players:
+            (await db.get(Rating, (p.id, "INHOUSE"))).elo += 7
+        await db.commit()
+    await world.close(session.id)
+    dm = world.owner_options_message()
+    assert "INHOUSE elo" in dm.content
+    for embed in dm.embeds:
+        lines = "\n".join(f.value for f in embed.fields)
+        for i, p in enumerate(players):
+            assert f"{p.mention} ({1500 + 30 * i + 7})" in lines
+    assert sum(len(e) for e in dm.embeds) <= 6000   # Discord's per-message embed text limit
+
+
+@flow
 async def test_final_teams_post_shows_each_players_elo_in_their_role(world):
     """The final teams post listed names only."""
     from bot.db.models import Rating

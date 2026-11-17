@@ -388,6 +388,7 @@ When someone runs `/link`, you get a DM with the request and two buttons:
 ### Match option choice (DM)
 
 When a recruitment reaches its signup close time (or `/make-teams` is run), you get a DM with the top 10 proposals (Option A to Option J, most balanced first) and one button per option:
+- Each player is listed with their current INHOUSE elo in brackets (the lane and team diffs in the footer are still worked out from role elos)
 - **Pick A** (green) — the most balanced
 - **Pick B** to **Pick J** (gray)
 
