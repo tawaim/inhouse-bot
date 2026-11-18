@@ -410,3 +410,55 @@ def test_backup_is_a_noop_for_in_memory_databases(tmp_path, monkeypatch):
 
     assert asyncio.run(body()) is None
     assert not (tmp_path / "backups").exists()
+
+
+def test_boot_recounts_games_played_from_recorded_games(tmp_path):
+    """games_played drifted short for many players in production (a running
+    counter, bumped by report/unreport paths that changed over time). Boot sets
+    it to the games actually recorded: per role from GameStat rows, every game
+    for INHOUSE, one per series for a reported match with no GameStat rows, and
+    nothing for an unreported match."""
+    db = tmp_path / "drift.db"
+    cfg = _config(str(db))
+
+    async def boot():
+        await init_db(cfg)
+        await close_db()
+
+    asyncio.run(boot())  # fresh schema
+
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO players (discord_id, region, link_status, created_at, manual_seed) "
+        "VALUES (7, 'na1', 'approved', '2026-01-01', 0)")
+    for role, gp in (("JUNGLE", 1), ("SUPPORT", 0), ("TOP", 9), ("INHOUSE", 2)):
+        conn.execute(
+            "INSERT INTO ratings (discord_id, role, elo, base_seed, inhouse_modifier, "
+            "games_played, total_balance_diff) VALUES (7, ?, 1500, 1500, 0, ?, 0)", (role, gp))
+    # Match 1: reported per game, 3 games: JUNGLE, JUNGLE, SUPPORT.
+    # Match 2: reported before per-game tracking (no GameStat rows), played TOP.
+    # Match 3: not reported; a stray GameStat row must not count.
+    for mid, winner in ((1, 1), (2, 2), (3, None)):
+        conn.execute(
+            "INSERT INTO matches (id, team1_json, team2_json, winner, team1_wins, team2_wins) "
+            "VALUES (?, '{}', '{}', ?, 0, 0)", (mid, winner))
+    for g, role in ((1, "JUNGLE"), (2, "JUNGLE"), (3, "SUPPORT")):
+        conn.execute(
+            "INSERT INTO game_stats (match_id, game_no, discord_id, role, won) "
+            "VALUES (1, ?, 7, ?, 1)", (g, role))
+    conn.execute(
+        "INSERT INTO game_stats (match_id, game_no, discord_id, role, won) "
+        "VALUES (3, 1, 7, 'JUNGLE', 1)")
+    for mid, role in ((1, "SUPPORT"), (2, "TOP")):
+        conn.execute(
+            "INSERT INTO match_performances (match_id, discord_id, role, won, "
+            "role_elo_delta, inhouse_elo_delta) VALUES (?, 7, ?, 1, 0, 0)", (mid, role))
+    conn.commit()
+    conn.close()
+
+    asyncio.run(boot())
+
+    conn = sqlite3.connect(str(db))
+    got = dict(conn.execute("select role, games_played from ratings where discord_id = 7"))
+    conn.close()
+    assert got == {"JUNGLE": 2, "SUPPORT": 1, "TOP": 1, "INHOUSE": 4}

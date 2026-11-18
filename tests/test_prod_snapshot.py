@@ -56,7 +56,23 @@ def test_boot_migrations_preserve_all_data(tmp_path):
 
     asyncio.run(body())
     after = _dump(db)
-    assert after == before
+    # Boot recounts games_played from the recorded games; everything else is
+    # untouched.
+    drop_gp = lambda rows: [r[:5] for r in rows]
+    assert after["counts"] == before["counts"]
+    assert drop_gp(after["ratings"]) == drop_gp(before["ratings"])
+    c = sqlite3.connect(db)
+    wrong = c.execute(
+        "select r.discord_id, r.role, r.games_played from ratings r where r.games_played != ("
+        " select count(*) from game_stats g join matches m on m.id = g.match_id"
+        " where m.winner is not null and g.discord_id = r.discord_id"
+        " and (r.role = 'INHOUSE' or g.role = r.role))"
+        " + (select count(*) from match_performances p join matches m on m.id = p.match_id"
+        " where m.winner is not null and p.discord_id = r.discord_id"
+        " and (r.role = 'INHOUSE' or p.role = r.role)"
+        " and not exists (select 1 from game_stats g2 where g2.match_id = m.id))").fetchall()
+    c.close()
+    assert wrong == []
     c = sqlite3.connect(db)
     assert c.execute("pragma integrity_check").fetchone()[0] == "ok"
     c.close()

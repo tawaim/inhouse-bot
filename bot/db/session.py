@@ -299,6 +299,32 @@ def _repair_matches_old_references(conn) -> None:
         log.info("Schema migration: `%s` foreign keys repaired", name)
 
 
+def _recount_games_played(conn) -> None:
+    """Set every ratings.games_played to the games actually recorded for it.
+
+    The column is a running counter (+1 per game on report, -1 on unreport), and
+    series reported or redone through older code paths left it short for many
+    players. Recount it from the source of truth on every boot: one GameStat row
+    per player per game played in a reported match, counted against the role
+    played that game (and every game for INHOUSE). A reported match with no
+    GameStat rows (a pre-per-game report) counts one per MatchPerformance, which
+    is how those were committed. Idempotent: a correct count is rewritten as-is."""
+    conn.exec_driver_sql(
+        """
+        UPDATE ratings SET games_played = (
+            SELECT COUNT(*) FROM game_stats g JOIN matches m ON m.id = g.match_id
+            WHERE m.winner IS NOT NULL AND g.discord_id = ratings.discord_id
+              AND (ratings.role = 'INHOUSE' OR g.role = ratings.role)
+        ) + (
+            SELECT COUNT(*) FROM match_performances p JOIN matches m ON m.id = p.match_id
+            WHERE m.winner IS NOT NULL AND p.discord_id = ratings.discord_id
+              AND (ratings.role = 'INHOUSE' OR p.role = ratings.role)
+              AND NOT EXISTS (SELECT 1 FROM game_stats g2 WHERE g2.match_id = m.id)
+        )
+        """
+    )
+
+
 def _run_migrations(conn) -> None:
     """Create missing tables, then run the forward-only migrations — all inside
     one explicit transaction, so a failure rolls everything back and aborts boot."""
@@ -314,6 +340,7 @@ def _run_migrations(conn) -> None:
     _add_missing_columns(conn)
     _fix_matches_autoincrement(conn)
     _repair_matches_old_references(conn)
+    _recount_games_played(conn)
 
 
 async def backup_database(reason: str = "manual") -> Optional[Path]:
